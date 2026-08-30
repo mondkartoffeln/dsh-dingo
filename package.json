@@ -1,7 +1,15 @@
 {
   "name": "dsh-dingo",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "DSH 声音提醒 + 对话直达插件：多对话并行时，哪个对话有回复就出声提醒，点右上角卡片直达对应对话；切到别的应用时还有系统级通知（macOS 通知中心 / Windows toast），点击直达。当前对话当/当当（crisp 档），其他对话叮/叮叮（soft 档）。",
+  "homepage": "https://github.com/february2015/dsh-dingo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/february2015/dsh-dingo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/february2015/dsh-dingo/issues"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -45,6 +53,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "verify": "npm run typecheck && npm run test && npm run build",
+    "prepare": "npm run build",
     "prepack": "npm run build",
     "prepublishOnly": "npm run verify"
   },
