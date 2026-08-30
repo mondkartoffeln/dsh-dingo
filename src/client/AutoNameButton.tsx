@@ -68,7 +68,7 @@ export function AutoNameButton({ rpc, sessionId }: AutoNameButtonProps): JSX.Ele
         disabled={busy}
         onClick={() => void handleClick()}
       >
-        {busy ? '…' : 'Rename'}
+        {busy ? '…' : '名'}
       </button>
       {toast && (
         <div style={styles.toast} role="status">
@@ -89,7 +89,7 @@ const styles: Record<string, React.CSSProperties> = {
     flex: 'none',
     height: 28,
     minWidth: 28,
-    padding: '0 10px',
+    padding: '0 6px',
     borderRadius: 999,
     border: '1px solid rgba(120,140,180,0.35)',
     background: 'rgba(24, 26, 32, 0.7)',
