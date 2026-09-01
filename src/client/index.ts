@@ -1,8 +1,8 @@
 /**
  * dsh-dingo — client half：会话卡片 Rail + 自动命名按钮 + 提示音播放。
  *
- * - 2.0 卡片 Rail 挂载到 `conversation.session.header.actions`（负 order，最左）；
- * - 自动命名按钮挂载到同一操作行（正 order）；
+ * - 2.0 卡片 Rail 挂载到 `sidebar.footer.action`（侧边栏底部、设置上方；hero 页也可见）；
+ * - 自动命名按钮挂载到会话头部操作行（`conversation.session.header.actions`，正 order）；
  * - 继续轮询 `/dingo.feedback` 消费声音层（speaking 提示音）与 1:1 卡片快照；
  * - 上报"当前查看的对话"（/dingo.set-current-session）。
  *
@@ -12,8 +12,10 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-// header actions 槽位由 dsh-client-ui-conversation 声明；type-only 导入加载 SlotMap 增强
+// header actions 槽位由 dsh-client-ui-conversation 声明；sidebar foot 槽位由 dsh-client-ui-sidebar 声明；
+// type-only 导入加载 SlotMap 增强
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { SessionCardRailCompact, type SessionCardRailCompactProps } from './SessionCardRailCompact.tsx'
 import { AutoNameButton, type AutoNameButtonProps } from './AutoNameButton.tsx'
 import { WorkspaceLabel, type WorkspaceLabelProps } from './WorkspaceLabel.tsx'
@@ -99,12 +101,12 @@ export function apply(ctx: ClientContext): void {
     }
   }, 'dsh-dingo: visibility report')
 
-  // 2.0 卡片 Rail：放在自动命名按钮右侧。
+  // 2.0 卡片 Rail：全局会话雷达 → 侧边栏底部（设置上方；折叠 rail 时压成小图标）。
   ctx.effect(() => {
-    return ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
-      name: 'conversation.session.header.utilities',
+    return ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+      name: 'sidebar.footer.action',
       id: 'dsh-dingo-card-rail',
-      order: -100,
+      order: 100,
       inject: () => ({
         rpc,
         getDraftBySession,

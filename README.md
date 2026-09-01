@@ -35,17 +35,16 @@
 
 ## Usage
 
-- The session header shows:
-  - Workspace label: the current session's workspace.
-  - `Rename` button: auto-name the current session.
-  - Summary pill: status counts for all active sessions.
-- Hover or click the summary pill to open the detailed panel:
+- The summary pill sits at the bottom of the sidebar (above the Settings button) and shows status counts for all active sessions.
+- The session header keeps: the workspace label and the `Rename` (auto-name) button.
+- Hover or click the summary pill to open the detailed panel upward:
   - First line: workspace name (with a small spinner + unfinished background task count if any).
   - Second line: session name.
   - Different colors per status.
   - Click a card to open that session.
   - `×` removes the card for this round.
 - The panel auto-closes after 5 seconds, or you can click the pill to toggle it.
+- The pill is always visible at the sidebar foot, including the hero / new-session screen; when the sidebar collapses to the rail it becomes a compact icon.
 - Subagent / Worker sessions do not appear in the card list.
 
 ![Stats Pill](docs/assets/stats-pill.svg)

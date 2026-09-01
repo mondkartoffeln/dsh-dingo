@@ -1,12 +1,15 @@
 /**
  * dsh-dingo 2.0 — 会话卡片 Rail（紧凑统计 + 悬浮详细面板）。
  *
+ * 挂在侧边栏底部 `sidebar.footer.action`（设置上方，hero 首页也可见）。
+ *
  * 内嵌只保留一个小统计：
  * - 有未处理异常 → 红色闪烁；
  * - 无异常但有未处理疑问 → 橙色闪烁；
  * - 无异常/疑问但有待阅读结论 → 绿色闪烁；
  * - 全部处理完 → 不闪烁。
- * 鼠标悬停/点击后向下滑出详细卡片面板，显示完整工作区名、对话名和状态颜色。
+ * 鼠标悬停/点击后向上滑出详细卡片面板，显示完整工作区名、对话名和状态颜色。
+ * 侧边栏收起为 56px rail 时（wide=false）压成小点 + 数字的紧凑图标。
  *
  * @module dsh-dingo/client/SessionCardRailCompact
  */
@@ -111,7 +114,7 @@ function playTone(tone: AnnouncementView['tone'], style: ToneStyle | undefined):
   void audio.play().catch(() => {})
 }
 
-/** 注入一次卡片 hover / spinner / pulse 样式（内联 style 不支持 :hover / keyframes）。 */
+/** 注入一次卡片 hover / spinner / pulse / 呼吸样式（内联 style 不支持 :hover / keyframes）。 */
 let stylesInjected = false
 function ensureStyles(): void {
   if (stylesInjected || typeof document === 'undefined') return
@@ -123,11 +126,22 @@ function ensureStyles(): void {
     '@keyframes lv-fb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }',
     '@keyframes lv-fb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }',
     '@keyframes lv-fb-border-pulse { 0%, 100% { box-shadow: 0 0 4px var(--lv-fb-pulse-color, transparent); } 50% { box-shadow: 0 0 14px var(--lv-fb-pulse-color, transparent); } }',
+    // 胶囊本体呼吸：scale + opacity，把注意力拉回侧边栏底部（普通档）。
+    '@keyframes lv-fb-breathe { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.06); opacity: 0.85; } }',
+    // 异常档：更快、幅度更大，最需要被看见。
+    '@keyframes lv-fb-breathe-fast { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.1); opacity: 0.72; } }',
+    // 尊重系统减弱动态：停掉胶囊、圆点、spinner 的一切动画与过渡。
+    '@media (prefers-reduced-motion: reduce) { .lv-fb-rail, .lv-fb-rail * { animation: none !important; transition: none !important; } }',
   ].join('\n')
   document.head.appendChild(style)
 }
 
-/** SessionCardRailCompact 注入面：/dingo RPC 调用器 + 会话跳转 + 会话快照（框架注入）。 */
+/**
+ * SessionCardRailCompact 注入面：/dingo RPC 调用器 + 会话跳转 + 会话快照（框架注入）。
+ * 挂在 `sidebar.footer.action`（list, root scope）：owner 只传 wide 折叠态；
+ * 标准 props 提供 useSessions / useWorkspaces（root 槽通用），无 useInput ——
+ * 当前会话草稿改由 getDraftBySession 直读输入快照。
+ */
 export interface SessionCardRailCompactProps {
   rpc: RpcCall
   /** 打开指定会话（卡片点击跳转；由 apply 注入，内部走 sessions.open）。 */
@@ -138,12 +152,10 @@ export interface SessionCardRailCompactProps {
    * - `byId`：各会话 displayTitle（与侧边栏同一数据源，卡片标题兜底）。
    */
   useSessions?: <T>(selector: (s: SessionListState) => T) => T | undefined
-  /**
-   * 框架标准钩子：读取当前会话输入框状态，用于识别“已输入但未发送”的草稿态。
-   */
-  useInput?: <T>(selector: (s: { draft?: string }) => T) => T | undefined
   /** 读取任意会话的未发送草稿（由 client 入口注入）。 */
   getDraftBySession?: (sessionId: string) => string
+  /** 侧边栏折叠态（false = 56px rail；此时压成紧凑小图标）。 */
+  wide?: boolean
 }
 
 /** 排序：异常 > 疑问 > 草稿 > 待阅读 > 等待后台/子任务 > 中间输出 > 执行中 > 正常。 */
@@ -194,7 +206,7 @@ function summaryBucket(
 /**
  * 紧凑统计 Rail：内嵌只显示一个统计胶囊，悬停/点击弹出详细卡片面板。
  */
-export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessions, useInput, getDraftBySession }: SessionCardRailCompactProps): JSX.Element | null {
+export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessions, getDraftBySession, wide }: SessionCardRailCompactProps): JSX.Element | null {
   const [snapshot, setSnapshot] = useState<FeedbackSnapshotView | undefined>(undefined)
   /** 当前打开的对话（框架注入；上报 host 用于"当前对话当/当当"判定）。 */
   const currentSessionId = useSessions?.((s) => s.current)
@@ -203,9 +215,8 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
   const allSessionIds = useSessions?.((s) => s.ids) ?? []
   /** 各会话后台任务（用于识别“等待后台/子任务”状态）。 */
   const jobsBySession = useSessions?.((s) => s.jobsBySession) ?? {}
-  /** 当前会话输入框草稿（未发送内容）；用于识别“草稿态”。 */
-  const draft = useInput?.((s) => s.draft) ?? ''
-  const hasDraft = typeof draft === 'string' && draft.trim().length > 0
+  /** 当前会话输入框草稿（root 槽无 useInput，直读输入快照）；用于识别“草稿态”。 */
+  const currentDraft = getDraftBySession?.(String(currentSessionId ?? '')) ?? ''
   /** 跨会话草稿轮询结果：sessionId → draft。 */
   const [drafts, setDrafts] = useState<Record<string, string>>({})
 
@@ -223,8 +234,8 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
     return jobs.filter((job) => job.status === 'running' || job.status === 'stopping').length
   }
 
-  /** 读取某会话的草稿（当前会话走 useInput，其它会话走轮询 map）。 */
-  const draftOf = (sessionId: string): string => drafts[sessionId] ?? (sessionId === currentSessionId ? draft : '')
+  /** 读取某会话的草稿（当前会话直读输入快照，其它会话走轮询 map）。 */
+  const draftOf = (sessionId: string): string => drafts[sessionId] ?? (sessionId === currentSessionId ? currentDraft : '')
   const hasDraftFor = (sessionId: string): boolean => draftOf(sessionId).trim().length > 0
 
   /** 判断是否内部会话（TaskSwarm Worker / 子代理），不参与用户卡片/统计。 */
@@ -337,10 +348,10 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
   // 记录当前会话草稿到模块级 Map，切换会话后仍能识别“填了但没发送”的会话。
   useEffect(() => {
     if (!currentSessionId) return
-    if (draft.trim()) persistedDrafts.set(currentSessionId, draft)
+    if (currentDraft.trim()) persistedDrafts.set(currentSessionId, currentDraft)
     else persistedDrafts.delete(currentSessionId)
     setDrafts({ ...Object.fromEntries(persistedDrafts) })
-  }, [currentSessionId, draft])
+  }, [currentSessionId, currentDraft])
 
 
   // 上报"当前查看的对话"：host 判定当前对话回复 → 当/当当（crisp 档），
@@ -417,25 +428,36 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
 
   const priorityColor = priority === 'error' ? '#ef4444' : priority === 'question' ? '#f59e0b' : priority === 'draft' ? '#a855f7' : priority === 'answered' ? '#22c55e' : undefined
   const pulse = priority ? 'lv-fb-pulse 1s ease-in-out infinite' : undefined
+  // 呼吸动画与辉光脉动叠加：异常档更快更猛，其余优先级普通档。
+  const breathing = priority === 'error'
+    ? 'lv-fb-breathe-fast 1.2s ease-in-out infinite, lv-fb-border-pulse 0.8s ease-in-out infinite'
+    : priority
+      ? 'lv-fb-breathe 1.8s ease-in-out infinite, lv-fb-border-pulse 1s ease-in-out infinite'
+      : undefined
 
   const summaryStyle: React.CSSProperties = {
-    ...styles.summary,
+    ...(wide === false ? styles.summaryRail : styles.summary),
     ...(priorityColor
       ? {
           borderColor: priorityColor,
           boxShadow: `0 0 10px ${priorityColor}`,
-          animation: 'lv-fb-border-pulse 1s ease-in-out infinite',
-          animationDelay: '-0.5s',
+          animation: breathing,
           ['--lv-fb-pulse-color' as string]: priorityColor,
         }
       : {}),
+  }
+
+  const railStyle: React.CSSProperties = {
+    ...styles.rail,
+    // 折叠 rail 时 foot 区居中排布，不再右挤。
+    marginLeft: wide === false ? 0 : 'auto',
   }
 
   return (
     <div
       ref={railRef}
       className="lv-fb-rail"
-      style={styles.rail}
+      style={railStyle}
       onMouseEnter={openPanel}
       onMouseLeave={() => {
         // 不立即关闭：5 秒内保持，超时后自动关闭
@@ -617,6 +639,23 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     whiteSpace: 'nowrap',
   },
+  /** 折叠 rail（wide=false）时的紧凑形态：更窄的内边距。 */
+  summaryRail: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 3,
+    height: 24,
+    minWidth: 24,
+    padding: '0 6px',
+    borderRadius: 999,
+    border: '1px solid rgba(120,140,180,0.35)',
+    background: 'rgba(24, 26, 32, 0.7)',
+    color: '#e8e8e8',
+    fontSize: 10,
+    lineHeight: 1,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
   dot: {
     display: 'inline-block',
     width: 8,
@@ -652,10 +691,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
   panel: {
     position: 'absolute',
-    top: '100%',
+    // 侧边栏底部席位：面板向上弹出（列有 overflow:hidden，向下会被裁）。
+    bottom: '100%',
     right: 0,
-    marginTop: 6,
-    zIndex: 1100,
+    marginBottom: 6,
+    zIndex: 1200,
     display: 'flex',
     flexDirection: 'column',
     gap: 6,
@@ -665,7 +705,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 8,
     borderRadius: 10,
     background: 'rgba(20, 22, 28, 0.97)',
-    boxShadow: '0 8px 30px rgba(0,0,0,0.45)',
+    boxShadow: '0 -8px 30px rgba(0,0,0,0.45)',
   },
   full: {
     position: 'relative',
