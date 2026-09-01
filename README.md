@@ -35,16 +35,24 @@
 
 ## Usage
 
-- The summary pill sits at the bottom of the sidebar (above the Settings button) and shows status counts for all active sessions.
-- The session header keeps: the workspace label and the `Rename` (auto-name) button.
-- Hover or click the summary pill to open the detailed panel upward:
+> Position: DSH is a three-column layout — **left sidebar** (workspaces / session list, settings) | **center conversation column** | **right details column**.
+> The summary bar sits at the **bottom of the left sidebar**, as the topmost row of the footer area: **above the footer action buttons** (e.g. the Cordis panel icon) and **above the Settings (gear) button**.
+
+- At the bottom of the left sidebar you will see a **full-width status bar** (the summary pill) on **its own row**, above the footer action buttons (Cordis panel etc., which wrap to the next line) and above the Settings (gear) button:
+  - red error dot + count / orange question dot + count / running spinner + count / intermediate / waiting / normal counts (icon sits tight against its number, units spaced apart);
+  - when something needs attention the whole bar breathes and glows (error pulses fastest);
+  - the right side shows "N active sessions".
+  - **Empty state**: with no active sessions (e.g. right after a restart, before any event) the bar stays visible showing a grey dot + `0`; opening it shows "暂无活跃会话" — it never silently disappears.
+  - **Visible on load**: no need to wait for new events — running / awaiting-reply / completed-unread / draft / background-work states are derived client-side from the session snapshot and merged with host cards once they arrive.
+  - The session header keeps the workspace label and the `Rename` (auto-name) button.
+- Hover or click the bar to open the detailed panel **upward**:
   - First line: workspace name (with a small spinner + unfinished background task count if any).
   - Second line: session name.
   - Different colors per status.
   - Click a card to open that session.
   - `×` removes the card for this round.
-- The panel auto-closes after 5 seconds, or you can click the pill to toggle it.
-- The pill is always visible at the sidebar foot, including the hero / new-session screen; when the sidebar collapses to the rail it becomes a compact icon.
+- The panel auto-closes after 5 seconds, or you can click the bar to toggle it.
+- The bar is always visible at the sidebar foot, including the hero / new-session screen; when the sidebar collapses to the 56px rail it becomes a compact icon.
 - Subagent / Worker sessions do not appear in the card list.
 
 ![Stats Pill](docs/assets/stats-pill.svg)

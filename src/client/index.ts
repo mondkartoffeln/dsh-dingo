@@ -106,7 +106,8 @@ export function apply(ctx: ClientContext): void {
     return ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
       name: 'sidebar.footer.action',
       id: 'dsh-dingo-card-rail',
-      order: 100,
+      // 负 order 排在最先：wrap 后独占第一行，Cordis / remote-web-ui 换到下一行。
+      order: -100,
       inject: () => ({
         rpc,
         getDraftBySession,

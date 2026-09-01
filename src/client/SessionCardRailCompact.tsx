@@ -136,6 +136,19 @@ function ensureStyles(): void {
   document.head.appendChild(style)
 }
 
+/** 向上找最近的 flex-row 容器（footer 操作行；绕过可能存在的条目包装层）。 */
+function findRowAncestor(el: HTMLElement | null): HTMLElement | null {
+  let node: HTMLElement | null = el?.parentElement ?? null
+  while (node) {
+    const style = getComputedStyle(node)
+    if (style.display.includes('flex') && (style.flexDirection === 'row' || style.flexDirection === 'row-reverse')) {
+      return node
+    }
+    node = node.parentElement
+  }
+  return null
+}
+
 /**
  * SessionCardRailCompact 注入面：/dingo RPC 调用器 + 会话跳转 + 会话快照（框架注入）。
  * 挂在 `sidebar.footer.action`（list, root scope）：owner 只传 wide 折叠态；
@@ -367,13 +380,24 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
     }
   }, [])
 
-  if (snapshot === undefined || !snapshot.enabled) return null
-  const items = snapshot.cards
-  // 当前对话正在输入是正常状态，不需要因为草稿单独从顶部提示；没有其他卡片时就不显示统计。
-  if (items.length === 0) return null
+  const snapshotAvailable = snapshot !== undefined && snapshot.enabled
+  const items = snapshot?.cards ?? []
+  if (!snapshotAvailable) {
+    // 快照未就绪/被关闭：不渲染（下方 showBar 为 false 直接走隐藏），
+    // 但计算保持在早退之前，保证 hooks 顺序稳定。
+  }
 
-  // 补卡：有草稿或后台任务/子任务，但已被移出 host 卡片清单的会话，在面板中仍展示。
-  const summaries = (sessionTitles ?? {}) as Record<string, { displayTitle?: string; cwd?: string; origin?: string }>
+  // 补卡：host 卡片之外，客户端从会话快照补出「仍在活跃」的会话——
+  // 执行中（running）、待你回答（pendingInteraction）、已完成未读（completed）、
+  // 草稿、后台任务/子任务。重启后 host 卡片为空时，靠这层补卡让雷达立即可见。
+  const summaries = (sessionTitles ?? {}) as Record<string, {
+    displayTitle?: string
+    cwd?: string
+    origin?: string
+    running?: boolean
+    pendingInteraction?: 'approval' | 'plan-review' | 'question'
+    completed?: boolean
+  }>
   const syntheticCards: SessionCardView[] = []
   for (const id of allSessionIds) {
     const sid = String(id)
@@ -381,10 +405,16 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
     // 子代理/Worker 会话不进入卡片清单。
     if (isInternalSession(sid)) continue
     if (items.some((card) => card.sessionId === sid)) continue
-    if (!hasDraftFor(sid) && !hasBackgroundWork(sid)) continue
+    const hasDraft = hasDraftFor(sid)
+    const hasJobs = hasBackgroundWork(sid)
+    const needsReply = Boolean(info?.pendingInteraction)
+    const busy = Boolean(info?.running)
+    const doneUnread = Boolean(info?.completed)
+    if (!hasDraft && !hasJobs && !needsReply && !busy && !doneUnread) continue
+    const status: SessionCardStatus = needsReply ? 'question' : busy ? 'running' : doneUnread ? 'answered' : 'normal'
     syntheticCards.push({
       sessionId: sid,
-      status: 'normal',
+      status,
       workspaceTitle: info?.cwd ? basename(info.cwd) : undefined,
       sessionTitle: info?.displayTitle,
       createdAt: Date.now(),
@@ -402,6 +432,26 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
   // 等待状态 = 后台任务/子任务，或 TaskSwarm 蜂群批次。
   const isWaiting = (sessionId: string): boolean =>
     hasBackgroundWork(sessionId) || items.some((card) => card.sessionId === sessionId && card.hasSwarm)
+
+  // 空态补位：快照就绪且启用即常显（即使没有活跃卡片）——
+  // 刚重启/事件未产生时用灰点 + 0 占住雷达位；会话数由 barHint 反映。
+  const showBar = snapshotAvailable
+
+  // 展开态独占一行：找到所在 footer 操作行并允许换行，本胶囊 width:100% 占满首行，
+  // Cordis / remote-web-ui 等其它条目自动换到下一行。依赖「条可见」——host 卡片
+  // 加载前组件先渲染 null、DOM 未挂载，晚到卡片出现时才真正挂载，效果必须随之重跑。
+  useEffect(() => {
+    if (!showBar || wide === false) return
+    const row = findRowAncestor(railRef.current)
+    if (row === null) return
+    const prev = row.style.flexWrap
+    row.style.flexWrap = 'wrap'
+    return () => {
+      row.style.flexWrap = prev
+    }
+  }, [showBar, wide])
+
+  if (!showBar) return null
 
   // 排序：草稿/后台等待/中间输出等 client 侧状态一起参与。
   const sortedItems = [...panelItems].sort(
@@ -436,7 +486,8 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
       : undefined
 
   const summaryStyle: React.CSSProperties = {
-    ...(wide === false ? styles.summaryRail : styles.summary),
+    // 展开态为独立全宽条（summaryBar）；折叠 rail 时缩回紧凑小胶囊（summaryRail）。
+    ...(wide === false ? styles.summaryRail : styles.summaryBar),
     ...(priorityColor
       ? {
           borderColor: priorityColor,
@@ -449,8 +500,10 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
 
   const railStyle: React.CSSProperties = {
     ...styles.rail,
-    // 折叠 rail 时 foot 区居中排布，不再右挤。
-    marginLeft: wide === false ? 0 : 'auto',
+    // 展开态占满整行（配合 flexWrap 换行），右缘只留 4px 空隙防贴边；
+    // 折叠 rail 时 foot 区居中，不右挤。
+    width: wide === false ? undefined : 'calc(100% - 4px)',
+    marginLeft: wide === false ? 0 : undefined,
   }
 
   return (
@@ -470,34 +523,68 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
         aria-label="会话卡片统计"
         onClick={openPanel}
       >
-        {priorityColor && (
-          <span style={{ ...styles.dot, background: priorityColor, animation: pulse }} />
+        {/* 空态补位：没有活跃卡片（如刚重启、事件未产生）时，灰点 + 0 占住雷达位置。 */}
+        {panelItems.length === 0 && (
+          <span style={styles.unit}>
+            <span style={{ ...styles.dot, ...styles.dotNormal }} />
+            <span style={styles.count}>0</span>
+          </span>
         )}
-        {priorityCount > 0 && <span style={styles.count}>{priorityCount}</span>}
-        {running > 0 && <span style={styles.spinner} />}
-        {running > 0 && <span style={styles.count}>{running}</span>}
-        {intermediate > 0 && <span style={{ ...styles.dot, ...styles.dotIntermediate }} />}
-        {intermediate > 0 && <span style={styles.count}>{intermediate}</span>}
-        {waiting > 0 && <span style={{ ...styles.dot, ...styles.dotWaiting }} />}
-        {waiting > 0 && <span style={styles.count}>{waiting}</span>}
-        {normal > 0 && <span style={{ ...styles.dot, ...styles.dotNormal }} />}
-        {normal > 0 && <span style={styles.count}>{normal}</span>}
+        {priorityColor && (
+          <span style={styles.unit}>
+            <span style={{ ...styles.dot, background: priorityColor, animation: pulse }} />
+            {priorityCount > 0 && <span style={styles.count}>{priorityCount}</span>}
+          </span>
+        )}
+        {running > 0 && (
+          <span style={styles.unit}>
+            <span style={styles.spinner} />
+            <span style={styles.count}>{running}</span>
+          </span>
+        )}
+        {intermediate > 0 && (
+          <span style={styles.unit}>
+            <span style={{ ...styles.dot, ...styles.dotIntermediate }} />
+            <span style={styles.count}>{intermediate}</span>
+          </span>
+        )}
+        {waiting > 0 && (
+          <span style={styles.unit}>
+            <span style={{ ...styles.dot, ...styles.dotWaiting }} />
+            <span style={styles.count}>{waiting}</span>
+          </span>
+        )}
+        {normal > 0 && (
+          <span style={styles.unit}>
+            <span style={{ ...styles.dot, ...styles.dotNormal }} />
+            <span style={styles.count}>{normal}</span>
+          </span>
+        )}
+        {/* 展开态全宽条：右侧补一个会话总数说明，避免长条留白。 */}
+        {wide !== false && <span style={styles.barHint}>{panelItems.length} 个活跃会话</span>}
       </button>
       {panelOpen && (
-        <div style={styles.panel} onMouseEnter={resetCloseTimer}>
-          {sortedItems.map((card) => (
-            <DetailedCard
-              key={card.sessionId}
-              card={card}
-              sessionTitles={sessionTitles as Record<string, { displayTitle?: string }> | undefined}
-              isCurrent={card.sessionId === currentSessionId}
-              bucket={summaryBucket(card, currentSessionId, hasDraftFor, isWaiting)}
-              dsJobsCount={backgroundJobCount(card.sessionId)}
-              swarmWaveCounts={card.swarmWaveCounts ?? []}
-              onOpen={handleOpenSession}
-              onDismiss={handleDismiss}
-            />
-          ))}
+        // 展开态面板与横条完全等宽（left/right 0 + 去掉 minWidth 撑宽）——
+        // 永不越过条的右缘，任何侧边栏宽度下右侧都不会被遮掩/裁切；
+        // rail 折叠态锚定小胶囊右缘、固定最小宽。
+        <div style={{ ...styles.panel, ...(wide === false ? { right: 0 } : { left: 0, right: 0, minWidth: 0 }) }} onMouseEnter={resetCloseTimer}>
+          {sortedItems.length === 0 ? (
+            <div style={styles.empty}>暂无活跃会话</div>
+          ) : (
+            sortedItems.map((card) => (
+              <DetailedCard
+                key={card.sessionId}
+                card={card}
+                sessionTitles={sessionTitles as Record<string, { displayTitle?: string }> | undefined}
+                isCurrent={card.sessionId === currentSessionId}
+                bucket={summaryBucket(card, currentSessionId, hasDraftFor, isWaiting)}
+                dsJobsCount={backgroundJobCount(card.sessionId)}
+                swarmWaveCounts={card.swarmWaveCounts ?? []}
+                onOpen={handleOpenSession}
+                onDismiss={handleDismiss}
+              />
+            ))
+          )}
         </div>
       )}
     </div>
@@ -621,16 +708,19 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'inline-flex',
     alignItems: 'center',
     flex: 'none',
-    marginLeft: 'auto',
   },
-  summary: {
+  // 展开态：独立全宽条（footer 操作行换行后独占一行）。
+  summaryBar: {
     display: 'inline-flex',
     alignItems: 'center',
-    gap: 4,
-    height: 28,
-    minWidth: 28,
-    padding: '0 10px',
-    borderRadius: 999,
+    // 单元之间留 8px（数字后面有空隙）；图标与自身数字在同一 unit 内紧贴。
+    gap: 8,
+    width: '100%',
+    boxSizing: 'border-box',
+    height: 32,
+    minWidth: 0,
+    padding: '0 12px',
+    borderRadius: 10,
     border: '1px solid rgba(120,140,180,0.35)',
     background: 'rgba(24, 26, 32, 0.7)',
     color: '#e8e8e8',
@@ -638,12 +728,21 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1,
     cursor: 'pointer',
     whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    justifyContent: 'flex-start',
+  },
+  /** 一个「图标 + 数字」单元：内部紧贴，单元之间由 summaryBar 的 gap 分隔。 */
+  unit: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 0,
+    flex: 'none',
   },
   /** 折叠 rail（wide=false）时的紧凑形态：更窄的内边距。 */
   summaryRail: {
     display: 'inline-flex',
     alignItems: 'center',
-    gap: 3,
+    gap: 8,
     height: 24,
     minWidth: 24,
     padding: '0 6px',
@@ -655,6 +754,23 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1,
     cursor: 'pointer',
     whiteSpace: 'nowrap',
+  },
+  /** 全宽条右端的会话总数提示（展开态；push 到最右避免留白）。 */
+  barHint: {
+    marginLeft: 'auto',
+    fontSize: 10,
+    color: '#9aa3b2',
+    opacity: 0.75,
+    whiteSpace: 'nowrap',
+  },
+  /** 面板空态文案（无活跃卡片时）。 */
+  empty: {
+    width: '100%',
+    boxSizing: 'border-box',
+    padding: '14px 10px',
+    textAlign: 'center',
+    fontSize: 12,
+    color: '#9aa3b2',
   },
   dot: {
     display: 'inline-block',
@@ -702,7 +818,8 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 260,
     maxHeight: '70vh',
     overflowY: 'auto',
-    padding: 8,
+    // 无内边距：卡片撑满到面板边缘，与状态框完全同宽（卡片自身带内边距）。
+    padding: 0,
     borderRadius: 10,
     background: 'rgba(20, 22, 28, 0.97)',
     boxShadow: '0 -8px 30px rgba(0,0,0,0.45)',
@@ -712,7 +829,9 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    width: 260,
+    // 自适应面板宽（面板与横条等宽）；rail 折叠态面板用固定 minWidth 时仍可伸展。
+    width: '100%',
+    minWidth: 0,
     minHeight: 56,
     boxSizing: 'border-box',
     color: '#e8e8e8',
