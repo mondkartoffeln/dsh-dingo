@@ -441,6 +441,24 @@ export class FeedbackEngine {
     return this.cards.delete(sessionId);
   }
 
+  /**
+   * 状态对账：宿主报告该会话已不再运行（agent idle / 已销毁），但卡片仍停在
+   * 「执行中」——说明那一轮的 turn/end 事件缺失（中断/崩溃）。把卡片降级为
+   * 结束态，防止永远转圈。
+   *
+   * 正常流程中 turn/end 先于 agent/status(idle) 到达，此时卡片已非 running，
+   * 本方法为空操作；直连网关（codex/pi）会话 idle 先行时，随后的 turn/end
+   * 会把卡片改写为正确的回答/提问/异常态，中间瞬态不可观察。
+   */
+  reconcileCard(sessionId: string): void {
+    const card = this.cards.get(sessionId);
+    if (card === undefined || card.status !== 'running') return;
+    card.status = 'normal';
+    card.updatedAt = this.now();
+    card.conclusionAt = this.now();
+    this.deps.logger?.(`[feedback] reconcile stale running card for "${sessionId}" -> normal (agent no longer running)`);
+  }
+
   /** 用户看过结论态：有答案/有疑问/有异常 → 正常（已看过）。 */
   markSeen(sessionId: string | undefined): boolean {
     if (sessionId === undefined) return false;
@@ -1132,6 +1150,32 @@ export function installFeedback(
       engine.removeSession(String(session.id));
     }),
   'dsh-dingo: feedback session/disposed');
+
+  // 1.1a) agent/status 对账：宿主报告 idle 但卡片仍执行中（turn/end 丢失）→ 降级结束态
+  ctx.effect(() => {
+    const off = (ctx as unknown as {
+      on(name: string, handler: (args: unknown) => void): () => void;
+    }).on('agent/status', (args: unknown) => {
+      const payload = args as { agent?: { session?: { id?: string } }; status?: string };
+      if (payload?.status === 'idle' && payload.agent?.session?.id) {
+        engine.reconcileCard(String(payload.agent.session.id));
+      }
+    });
+    return off;
+  }, 'dsh-dingo: feedback agent/status reconcile');
+
+  // 1.1b) agent/disposed 对账：agent 销毁时若卡片仍执行中 → 降级结束态
+  ctx.effect(() => {
+    const off = (ctx as unknown as {
+      on(name: string, handler: (args: unknown) => void): () => void;
+    }).on('agent/disposed', (args: unknown) => {
+      const payload = args as { agent?: { session?: { id?: string } } };
+      if (payload?.agent?.session?.id) {
+        engine.reconcileCard(String(payload.agent.session.id));
+      }
+    });
+    return off;
+  }, 'dsh-dingo: feedback agent/disposed reconcile');
 
   // 2) jobs 域 settled（守卫缺失：无 ctx.jobs 的宿主不接 jobs 源）
   const jobs = ctx.get('jobs') as { onJobDone?: (listener: (snapshot: JobSnapshotLike) => void) => () => void } | undefined;

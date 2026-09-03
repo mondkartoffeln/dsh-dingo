@@ -35,6 +35,9 @@ export interface AnnouncementView {
   replayable: boolean
 }
 
+/** × 关闭一张合成卡后，同一种 summary 状态下不再立刻重新合成的时间窗（5 分钟）。 */
+const SYNTHETIC_DISMISS_SUPPRESS_MS = 5 * 60_000
+
 /** 2.0 会话卡片状态。 */
 export type SessionCardStatus = 'running' | 'answered' | 'question' | 'error' | 'normal'
 
@@ -263,6 +266,9 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
   // 见过 speaking 的项（speaking → 消失 的过渡只报一次 spoken）
   const seenSpeaking = useRef(new Set<string>())
   const reportedSpoken = useRef(new Set<string>())
+  // × 关闭后的合成卡抑制：sessionId → 关闭时间戳。synth 卡会按
+  // summary.running 每轮重新合成，若不加抑制，「× 关闭」看起来永远不好使。
+  const syntheticDismissedAt = useRef(new Map<string, number>())
   // Rail 容器与悬浮面板状态
   const railRef = useRef<HTMLDivElement | null>(null)
   const [panelOpen, setPanelOpen] = useState(false)
@@ -302,8 +308,9 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
     closePanel()
   }
 
-  /** 关闭完整面板里的卡片：仅移除本次卡片。 */
+  /** 关闭完整面板里的卡片：仅移除本次卡片（并临时抑制合成卡回生）。 */
   const handleDismiss = (sessionId: string): void => {
+    syntheticDismissedAt.current.set(String(sessionId), Date.now())
     void rpc.call('/dingo', 'feedback', { action: 'dismiss-card', sessionId }).catch(() => {})
   }
 
@@ -411,6 +418,18 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
     const busy = Boolean(info?.running)
     const doneUnread = Boolean(info?.completed)
     if (!hasDraft && !hasJobs && !needsReply && !busy && !doneUnread) continue
+    // × 关闭后的合成卡抑制：summary 未翻转为干净之前，不再立刻把同一张卡
+    // 重新合成出来（否则「关闭按钮不好使」——host 卡片删了，客户端又按
+    // running 补一张，看起来 × 永远点不掉）。
+    const dismissedAt = syntheticDismissedAt.current.get(sid)
+    if (dismissedAt !== undefined) {
+      const sameReason = busy || needsReply || doneUnread || hasDraft || hasJobs
+      if (!sameReason) {
+        syntheticDismissedAt.current.delete(sid)
+      } else if (Date.now() - dismissedAt < SYNTHETIC_DISMISS_SUPPRESS_MS) {
+        continue
+      }
+    }
     const status: SessionCardStatus = needsReply ? 'question' : busy ? 'running' : doneUnread ? 'answered' : 'normal'
     syntheticCards.push({
       sessionId: sid,
