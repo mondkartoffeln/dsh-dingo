@@ -36,8 +36,18 @@ function sessionEvent(type: string, data: unknown = {}, extra: Record<string, un
 }
 
 describe('plugin dependencies', () => {
-  it('declares host services before feedback, RPC, and rename-tool initialization read them', () => {
-    expect(inject).toEqual(expect.arrayContaining(['connection', 'apiProxy', 'tools']))
+  it('inject 只声明宿主必需的 tools（web 专属服务走作用域注入）', () => {
+    expect(inject).toEqual(expect.arrayContaining(['tools']))
+  })
+
+  // 回归护栏：顶层 `inject` 是 Cordis 的硬等待。声明了宿主没有的服务（例如新版
+  // DSH 已移除的 apiProxy，或只在 web profile 存在的 connection / webServer），
+  // 插件会永久 pending，boot 的 assertEntriesActivated 会让整个 profile 起不来。
+  // 这类服务改用 ctx.inject([...], cb) 的作用域注入。
+  it('绝不 inject 可选服务或 web 专属服务（避免 profile 启动失败）', () => {
+    for (const forbidden of ['apiProxy', 'connection', 'webServer', 'sessions', 'sessionTitle', 'agents', 'llm', 'commands']) {
+      expect(inject).not.toContain(forbidden)
+    }
   })
 })
 

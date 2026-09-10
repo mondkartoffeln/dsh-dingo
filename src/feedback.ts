@@ -219,11 +219,11 @@ export interface FeedbackDeps {
   readonly audio: FeedbackAudio;
   /** 反馈配置（live 读取；dnd 由 /dingo dnd 切换）。 */
   readonly config: FeedbackConfig;
-  /** 会话 → 工作区标题解析（缺省经 ctx.apiProxy.workspace.list()，懒缓存）。 */
+  /** 会话 → 工作区标题解析（缺省读 `ctx.workspaceRegistry.list()`，惰性缓存）。 */
   readonly resolveWorkspace?: (sessionId: string, cwd?: string) => Promise<string | undefined>;
   /**
-   * 会话 → 会话标题解析（缺省经 ctx.apiProxy.sessions.list() 的
-   * `session/title` 投影，懒缓存；不可用 → undefined，模板回落「会话」）。
+   * 会话 → 会话标题解析（缺省读活动会话的 `sessionTitle.get(session)` 标题投影，
+   * 惰性；不可用 → undefined，模板回落「会话」）。
    */
   readonly resolveSessionTitle?: (sessionId: string) => Promise<string | undefined>;
   /** 日志（缺省静默）。 */
@@ -1106,8 +1106,9 @@ export interface TonePlayer {
  * - `ctx.jobs.onJobDone`：jobs 域 settled → task-done / task-error（守卫缺失）；
  * - `ctx.userQuestions.ask` 包装：questions 域 ask() → need-confirm（守卫缺失）。
  *
- * 工作区标题解析：默认经 `ctx.apiProxy.workspace.list()` 懒缓存（loopback 权威，
- * 参照 T-3 session-ctrl 的网关姿势）；`deps.resolveWorkspace` 可覆盖（测试注入）。
+ * 工作区 / 会话标题解析：默认惰性读宿主 `workspaceRegistry` / `sessions` +
+ * `sessionTitle`（`ctx.get`，取不到就降级）；`deps.resolveWorkspace` /
+ * `deps.resolveSessionTitle` 可覆盖（测试注入）。
  * 所有订阅随 ctx.effect 回收；返回引擎实例供 RPC / 命令共享。
  */
 export interface FeedbackInstallOptions {
@@ -1298,44 +1299,54 @@ function fromView(view: AnnouncementView): Announcement {
   };
 }
 
-// ─────────────────────────── 工作区标题解析 ───────────────────────────
+// ───────────────────── 工作区 / 会话标题解析 ─────────────────────
+//
+// 这两个解析器只做「给提醒文案补上工作区名 / 会话名」的增强，全部**惰性**读取
+// 宿主服务（`ctx.get(...)`，且在返回的 async 函数体内才读）：
+//
+// - 绝不用 `ctx.xxx` 直接取属性——那要求 `inject` 声明；
+// - 绝不把服务写进 `inject`——声明一个宿主没有的服务（如新版已移除的 apiProxy）
+//   会让插件永久 pending，boot 的 assertEntriesActivated 直接让整个 profile 起不来
+//   （2026-09 真实踩坑：web profile 无法启动）。
+//
+// 旧实现把 `(ctx as any).apiProxy` 写成**默认参数**，于是在 install 阶段就被求值 →
+// 加载即崩。现在改为运行期惰性读取，取不到就降级。
 
-/** 宿主 apiProxy.workspace.list 的最小形状（结构兼容 @deepseek-ai/dsh-host-apiproxy）。 */
-export interface WorkspaceListApi {
-  list(request: { rpcId: unknown; payload: Record<string, never> }): Promise<{
-    result: {
-      ok: boolean;
-      value?: { items?: readonly { workspaceId: string; title: string; sessionIds?: readonly string[] }[] };
-    };
-  }>;
+/**
+ * 宿主 `ctx.workspaceRegistry`（`@deepseek-ai/dsh-workspace`）的最小形状。
+ * `list()` 是**同步**的，返回工作区记录（`title` + `sessionIds`）。
+ */
+export interface WorkspaceRegistryLike {
+  list(): readonly { title: string; sessionIds?: readonly string[] }[];
 }
 
-/** 默认工作区标题解析：workspace.list() → sessionId 所在工作区 title；cwd basename 兜底。 */
+/**
+ * 默认工作区标题解析：`workspaceRegistry.list()` → sessionId 所属工作区 title；
+ * 取不到时 cwd basename 兜底。
+ */
 export function defaultWorkspaceResolver(
   ctx: Context,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  apiProxy: { workspace?: WorkspaceListApi } | undefined = (ctx as any).apiProxy,
 ): (sessionId: string, cwd?: string) => Promise<string | undefined> {
   let cache: Map<string, string> | undefined;
   return async (sessionId, cwd) => {
-    if (apiProxy?.workspace?.list) {
-      try {
-        cache ??= await loadWorkspaceTitles(apiProxy.workspace);
+    try {
+      const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined;
+      if (typeof registry?.list === 'function') {
+        cache ??= loadWorkspaceTitles(registry);
         const hit = cache.get(sessionId);
         if (hit) return hit;
-      } catch {
-        // 宿主清单不可用 → cwd basename 兜底
       }
+    } catch {
+      // 宿主工作区清单不可用 → cwd basename 兜底
     }
     return cwd ? basename(cwd) : undefined;
   };
 }
 
-async function loadWorkspaceTitles(api: WorkspaceListApi): Promise<Map<string, string>> {
-  const response = await api.list({ rpcId: makeRpcId(), payload: {} });
-  if (!response.result.ok) return new Map();
+/** 展开工作区清单为 sessionId → 工作区标题映射。 */
+function loadWorkspaceTitles(registry: WorkspaceRegistryLike): Map<string, string> {
   const map = new Map<string, string>();
-  for (const workspace of response.result.value?.items ?? []) {
+  for (const workspace of registry.list()) {
     for (const sessionId of workspace.sessionIds ?? []) {
       map.set(sessionId, workspace.title);
     }
@@ -1343,66 +1354,36 @@ async function loadWorkspaceTitles(api: WorkspaceListApi): Promise<Map<string, s
   return map;
 }
 
-/** 宿主 apiProxy.sessions.list 的最小形状（结构兼容 @deepseek-ai/dsh-host-apiproxy）。 */
-export interface SessionListApi {
-  list(request: { rpcId: unknown; payload: Record<string, never> }): Promise<{
-    result: {
-      ok: boolean;
-      value?: {
-        items?: readonly {
-          sessionId: string;
-          projections?: { values?: Readonly<Record<string, unknown>> };
-        }[];
-      };
-    };
-  }>;
+/** 宿主 `ctx.sessionTitle` 的最小形状（这里只用到读标题的 `get`）。 */
+export interface SessionTitleReadLike {
+  get(session: { snapshotEvents?(): readonly unknown[] }): { title?: string } | undefined;
 }
 
-/** 默认会话标题解析：sessions.list() → `session/title` 投影；宿主不可用 → undefined。 */
+/** 宿主 `ctx.sessions` 的最小形状（这里只用到按 id 取活动会话）。 */
+interface SessionsStoreReadLike {
+  get?(id: string): { snapshotEvents?(): readonly unknown[] } | undefined;
+}
+
+/**
+ * 默认会话标题解析：读**活动会话**的标题投影（`sessionTitle.get(session)`）。
+ * 会话未加载、宿主未挂载 `sessions`/`sessionTitle`，或还没标题 → undefined，
+ * 由调用方模板回落到「会话」。
+ */
 export function defaultSessionTitleResolver(
   ctx: Context,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  apiProxy: { sessions?: SessionListApi } | undefined = (ctx as any).apiProxy,
 ): (sessionId: string) => Promise<string | undefined> {
-  let cache: Map<string, string> | undefined;
   return async (sessionId) => {
-    if (!apiProxy?.sessions?.list) return undefined;
     try {
-      cache ??= await loadSessionTitles(apiProxy.sessions);
-      return cache.get(sessionId);
+      const sessions = ctx.get('sessions') as SessionsStoreReadLike | undefined;
+      const session = sessions?.get?.(sessionId);
+      if (session === undefined) return undefined;
+      const titles = ctx.get('sessionTitle') as SessionTitleReadLike | undefined;
+      const title = titles?.get?.(session)?.title;
+      return typeof title === 'string' && title !== '' ? title : undefined;
     } catch {
       return undefined;
     }
   };
-}
-
-async function loadSessionTitles(api: SessionListApi): Promise<Map<string, string>> {
-  const response = await api.list({ rpcId: makeRpcId(), payload: {} });
-  if (!response.result.ok) return new Map();
-  const map = new Map<string, string>();
-  for (const item of response.result.value?.items ?? []) {
-    const title = sessionTitleOf(item);
-    if (title) map.set(item.sessionId, title);
-  }
-  return map;
-}
-
-/**
- * 从 session.list 条目提取会话标题（`title` 投影：纯字符串，见
- * @deepseek-ai/dsh-session-title —— 键是 'title' 不是 'session/title'，
- * 值是 string 不是对象；侧边栏显示用的同一投影）。无标题返回 undefined。
- */
-function sessionTitleOf(item: { projections?: { values?: Readonly<Record<string, unknown>> } }): string | undefined {
-  const title = item.projections?.values?.['title'];
-  return typeof title === 'string' && title !== '' ? title : undefined;
-}
-
-/** 生成一次宿主 RPC 调用 id（与 T-3 rpc.ts 相同的降级姿势）。 */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function makeRpcId(): any {
-  return typeof globalThis.crypto?.randomUUID === 'function'
-    ? globalThis.crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function basename(path: string): string {

@@ -1,36 +1,42 @@
 import { describe, expect, it } from 'vitest'
-import { autoNameSession } from '../src/auto-name.ts'
+import { autoNameSession, renameSessionTitle } from '../src/auto-name.ts'
 
 interface FakeLlm {
   listModels?: (provider: string) => Promise<readonly { id?: string }[]>
   stream: (options: unknown) => AsyncIterable<{ type: string; text?: string }>
 }
 
+/** 新形状：`user/message` 的 data 就是 UserMessage，content 是 ContentBlock[]。 */
+const defaultEvents = [
+  { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '帮我优化一下这个项目的构建流程' }] } },
+  { type: 'assistant/message', data: { role: 'assistant', content: [{ type: 'text', text: '好的，我来分析构建脚本。' }] } },
+]
+
+const USER_TEXT = '帮我优化一下这个项目的构建流程'
+
 function fakeCtx(overrides: {
-  history?: () => unknown
-  rename?: () => unknown
-  noSessions?: boolean
+  events?: readonly unknown[]
+  rename?: (session: unknown, title: string) => { title: string }
   llm?: FakeLlm
+  noSessions?: boolean
+  missingSession?: boolean
+  noSessionTitle?: boolean
 } = {}) {
+  const session = { id: 'sess-1', snapshotEvents: () => overrides.events ?? defaultEvents }
   return {
-    get: (name: string) => (name === 'llm' ? overrides.llm : undefined),
-    apiProxy: overrides.noSessions ? undefined : {
-      sessions: {
-        history: overrides.history ?? (async () => ({
-          result: {
-            ok: true,
-            value: {
-              events: [
-                { event: { type: 'user/message', data: { content: '帮我优化一下这个项目的构建流程' } } },
-                { event: { type: 'assistant/message', data: { message: { content: '好的，我来分析构建脚本。' } } } },
-              ],
-            },
-          },
-        })),
-        rename: overrides.rename ?? (async (request: { payload: { title: string } }) => ({
-          result: { ok: true, value: { title: request.payload.title, seq: 1 } },
-        })),
-      },
+    get: (name: string) => {
+      if (name === 'llm') return overrides.llm
+      if (name === 'sessions') {
+        if (overrides.noSessions) return undefined
+        return { get: (id: string) => (overrides.missingSession || id !== 'sess-1' ? undefined : session) }
+      }
+      if (name === 'sessionTitle') {
+        if (overrides.noSessionTitle) return undefined
+        return {
+          rename: overrides.rename ?? ((_session: unknown, title: string) => ({ title, eventSeq: 1 })),
+        }
+      }
+      return undefined
     },
   }
 }
@@ -50,34 +56,127 @@ function recordingLlm(models: readonly string[], reply = '构建流程优化') {
   return { llm, calls }
 }
 
+/** 从一次 stream 调用参数里取出实际喂给模型的 prompt 文本。 */
+function promptOf(call: Record<string, unknown> | undefined): string {
+  const messages = call?.messages as Array<{ content?: Array<{ text?: string }> }> | undefined
+  return messages?.[0]?.content?.[0]?.text ?? ''
+}
+
 describe('autoNameSession', () => {
-  it('从最近 user 消息生成标题并调用 rename', async () => {
-    let renamed = ''
+  it('从最近 user 消息生成标题并经 sessionTitle 写入', async () => {
+    let renamedTitle = ''
     const ctx = fakeCtx({
-      rename: async (request: { payload: { title: string } }) => {
-        renamed = request.payload.title
-        return { result: { ok: true, value: { title: request.payload.title, seq: 1 } } }
+      rename: (_session, title) => {
+        renamedTitle = title
+        return { title }
       },
     }) as never
     const result = await autoNameSession(ctx as never, 'sess-1')
     expect(result.ok).toBe(true)
-    expect(result.title).toBe('帮我优化一下这个项目的构建流程')
-    expect(renamed).toBe('帮我优化一下这个项目的构建流程')
+    expect(result.title).toBe(USER_TEXT)
+    expect(renamedTitle).toBe(USER_TEXT)
   })
 
-  it('缺少 apiProxy.sessions 时返回失败', async () => {
-    const ctx = fakeCtx({ noSessions: true }) as never
-    const result = await autoNameSession(ctx as never, 'sess-1')
+  it('缺少 sessions 服务时返回失败', async () => {
+    const result = await autoNameSession(fakeCtx({ noSessions: true }) as never, 'sess-1')
     expect(result.ok).toBe(false)
+    expect(result.error).toContain('sessions')
   })
 
-  it('rename 失败时返回失败且保持原名', async () => {
+  it('会话未在宿主中加载时返回失败', async () => {
+    const result = await autoNameSession(fakeCtx({ missingSession: true }) as never, 'sess-1')
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('未在宿主中加载')
+  })
+
+  it('缺少 sessionTitle 服务时返回失败', async () => {
+    const result = await autoNameSession(fakeCtx({ noSessionTitle: true }) as never, 'sess-1')
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('session-title')
+  })
+
+  it('rename 抛错（如标题非法）时返回失败', async () => {
     const ctx = fakeCtx({
-      rename: async () => ({ result: { ok: false, error: { message: 'title-invalid' } } }),
+      rename: () => {
+        throw new Error('session title must contain visible characters')
+      },
     }) as never
     const result = await autoNameSession(ctx as never, 'sess-1')
     expect(result.ok).toBe(false)
-    expect(result.error).toBe('title-invalid')
+    expect(result.error).toBe('session title must contain visible characters')
+  })
+})
+
+describe('renameSessionTitle', () => {
+  it('返回 sessionTitle.rename 规范化后的标题', () => {
+    const ctx = fakeCtx({ rename: () => ({ title: '规范化后的标题' }) }) as never
+    const result = renameSessionTitle(ctx as never, 'sess-1', '  原始标题  ')
+    expect(result).toEqual({ ok: true, title: '规范化后的标题' })
+  })
+
+  it('无 sessions 服务时给出可读错误', () => {
+    const result = renameSessionTitle(fakeCtx({ noSessions: true }) as never, 'sess-1', '标题')
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('未在宿主中加载')
+  })
+
+  it('无 sessionTitle 服务时给出可读错误', () => {
+    const result = renameSessionTitle(fakeCtx({ noSessionTitle: true }) as never, 'sess-1', '标题')
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('session-title')
+  })
+})
+
+describe('用户消息文本抽取（新形状）', () => {
+  it('拼接多个 text block，忽略 reasoning block', async () => {
+    let renamedTitle = ''
+    const ctx = fakeCtx({
+      events: [
+        {
+          type: 'user/message',
+          data: {
+            role: 'user',
+            content: [
+              { type: 'reasoning', text: '这是思考过程，不应被当成用户输入' },
+              { type: 'text', text: '第一段' },
+              { type: 'text', text: '第二段' },
+            ],
+          },
+        },
+      ],
+      rename: (_s, title) => {
+        renamedTitle = title
+        return { title }
+      },
+    }) as never
+    await autoNameSession(ctx as never, 'sess-1')
+    expect(renamedTitle).toBe('第一段 第二段')
+  })
+
+  it('兼容旧形状（data.message.content 为字符串）', async () => {
+    let renamedTitle = ''
+    const ctx = fakeCtx({
+      events: [{ type: 'user/message', data: { message: { content: '旧的存档消息形状' } } }],
+      rename: (_s, title) => {
+        renamedTitle = title
+        return { title }
+      },
+    }) as never
+    await autoNameSession(ctx as never, 'sess-1')
+    expect(renamedTitle).toBe('旧的存档消息形状')
+  })
+
+  it('只把最近 5 条用户消息喂给模型', async () => {
+    const events = Array.from({ length: 7 }, (_v, index) => ({
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'text', text: `消息${index + 1}` }] },
+    }))
+    const { llm, calls } = recordingLlm(['deepseek-flash'], '标题')
+    await autoNameSession(fakeCtx({ events, llm }) as never, 'sess-1')
+
+    const prompt = promptOf(calls[0])
+    for (const kept of ['消息3', '消息4', '消息5', '消息6', '消息7']) expect(prompt).toContain(kept)
+    for (const dropped of ['消息1', '消息2']) expect(prompt).not.toContain(dropped)
   })
 })
 
@@ -115,7 +214,7 @@ describe('autoNameSession 标题模型（DeepSeek-V4.1-Flash 适配）', () => {
     const result = await autoNameSession(fakeCtx({ llm }) as never, 'sess-1')
 
     expect(calls).toHaveLength(0)
-    expect(result.title).toBe('帮我优化一下这个项目的构建流程')
+    expect(result.title).toBe(USER_TEXT)
   })
 
   it('没有 listModels 能力的旧宿主仍按首选型号调用', async () => {
@@ -145,6 +244,6 @@ describe('autoNameSession 标题模型（DeepSeek-V4.1-Flash 适配）', () => {
     const { llm } = recordingLlm(['deepseek-flash'], '请提供更多消息')
     const result = await autoNameSession(fakeCtx({ llm }) as never, 'sess-1')
 
-    expect(result.title).toBe('帮我优化一下这个项目的构建流程')
+    expect(result.title).toBe(USER_TEXT)
   })
 })

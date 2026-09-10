@@ -47,30 +47,77 @@ const DEFAULT_TITLE_PROVIDER = 'deepseek-official'
  */
 const TITLE_MODEL_PREFERENCE: readonly string[] = ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro']
 
-/** 会话历史/重命名 API 的最小形状（避免强耦合）。 */
-interface SessionsApiLike {
-  history(request: { rpcId: unknown; payload: { sessionId: string; maxMessages?: number } }): Promise<{
-    result: {
-      ok: boolean
-      value?: { events?: readonly HistoryEntryLike[] }
-      error?: { message?: string }
-    }
-  }>
-  rename(request: { rpcId: unknown; payload: { sessionId: string; title: string } }): Promise<{
-    result: {
-      ok: boolean
-      value?: { title: string }
-      error?: { message?: string }
-    }
-  }>
+/* ──────────────────────────────────────────────────────────────────────
+ * 宿主服务的最小形状（避免强耦合）
+ *
+ * 新版 DSH 已移除 `ctx.apiProxy`：会话状态改由 `ctx.sessions`（`SessionStore`，
+ * 由 `@deepseek-ai/dsh-session` 提供）暴露；重命名改由 `ctx.sessionTitle`
+ * （`@deepseek-ai/dsh-session-title`）提供。两者都按**可选**服务用 `ctx.get()` 取，
+ * 拿不到就返回可读错误，绝不放进插件 `inject`（否则整个 profile 起不来）。
+ * ────────────────────────────────────────────────────────────────────── */
+
+/** 宿主活动会话的最小形状（`@deepseek-ai/dsh-session` 的 `Session`）。 */
+export interface SessionLike {
+  readonly id: string
+  snapshotEvents?(): readonly SessionEventLike[]
 }
 
-interface HistoryEntryLike {
-  event?: { type?: string; data?: Record<string, unknown>; [key: string]: unknown }
+/** 会话事件信封；`user/message` 的 `data` 即 `UserMessage`。 */
+export interface SessionEventLike {
+  readonly type?: string
+  readonly data?: unknown
+}
+
+/** 宿主 `ctx.sessions`（`SessionStore`）的最小形状。 */
+interface SessionsStoreLike {
+  get(id: string): SessionLike | undefined
 }
 
 /**
- * 执行自动命名：读取最近消息 → 规则生成标题 → 写入 session.rename。
+ * 宿主 `ctx.sessionTitle` 的最小形状。
+ * `rename` 是**同步**的，返回折叠后的标题快照（`{ title, eventSeq }`）；
+ * 标题规范化后为空时抛 `SessionTitleInvalidError`，会话不在 store 里时抛 `Error`。
+ */
+interface SessionTitleLike {
+  rename(session: SessionLike, title: string): { title?: string } | undefined
+}
+
+/** 取宿主活动会话；无 `sessions` 服务或会话未加载时返回 `undefined`。 */
+export function liveSession(ctx: Context, sessionId: string): SessionLike | undefined {
+  const sessions = ctx.get('sessions') as SessionsStoreLike | undefined
+  return sessions?.get?.(sessionId)
+}
+
+/**
+ * 把标题写入会话——**唯一**的重命名入口（`/dingo rename`、header 按钮、
+ * `rename_current_session` 工具共用）。
+ *
+ * 走宿主 `session-title` 服务而不是自己 append 事件：标题规范化、对自动标题的
+ * 取代（supersede）、`session/title` 事件的写入都由它负责。
+ */
+export function renameSessionTitle(
+  ctx: Context,
+  sessionId: string,
+  title: string,
+): { ok: true; title: string } | { ok: false; error: string } {
+  const session = liveSession(ctx, sessionId)
+  if (session === undefined) {
+    return { ok: false, error: `重命名不可用：会话 ${sessionId} 未在宿主中加载（或宿主无 sessions 服务）` }
+  }
+  const titles = ctx.get('sessionTitle') as SessionTitleLike | undefined
+  if (typeof titles?.rename !== 'function') {
+    return { ok: false, error: '重命名不可用：宿主未挂载 session-title 服务' }
+  }
+  try {
+    const accepted = titles.rename(session, title)
+    return { ok: true, title: accepted?.title ?? title }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * 执行自动命名：读取最近用户消息 → LLM/规则生成标题 → 写入会话标题。
  * 返回新标题；失败时保持原名并返回错误信息。
  */
 export async function autoNameSession(
@@ -78,72 +125,72 @@ export async function autoNameSession(
   sessionId: string,
   options?: AutoNameOptions,
 ): Promise<AutoNameResult> {
-  const api = (ctx as unknown as { apiProxy?: { sessions?: SessionsApiLike } }).apiProxy
-  if (!api?.sessions) {
-    return { ok: false, error: '自动命名不可用：缺少 apiProxy.sessions' }
+  const session = liveSession(ctx, sessionId)
+  if (session === undefined) {
+    return { ok: false, error: `自动命名不可用：会话 ${sessionId} 未在宿主中加载（或宿主无 sessions 服务）` }
   }
 
-  const rpcId = makeRpcId()
-  const history = await api.sessions.history({ rpcId, payload: { sessionId, maxMessages: 50 } })
-  if (!history.result.ok || !history.result.value) {
-    return { ok: false, error: history.result.error?.message ?? '读取会话历史失败' }
-  }
-
-  const texts = extractRecentUserTexts(history.result.value.events ?? [])
+  const texts = extractRecentUserTexts(session.snapshotEvents?.() ?? [])
   const target = await resolveTitleTarget(ctx, options)
   const title = (target ? await generateTitleWithLlm(target, texts) : undefined) ?? generateTitle(texts)
   if (!title) {
     return { ok: false, error: '未能从对话内容生成有效标题' }
   }
 
-  const renamed = await api.sessions.rename({ rpcId, payload: { sessionId, title } })
-  if (!renamed.result.ok) {
-    return { ok: false, error: renamed.result.error?.message ?? '写入标题失败' }
-  }
-
-  return { ok: true, title: renamed.result.value?.title ?? title }
+  const renamed = renameSessionTitle(ctx, sessionId, title)
+  if (!renamed.ok) return { ok: false, error: renamed.error }
+  return { ok: true, title: renamed.title }
 }
 
-/** 从 history 事件中提取最近 user 纯文本（只取用户输入，省 token 且更代表意图）。 */
-function extractRecentUserTexts(events: readonly HistoryEntryLike[]): string[] {
+/** 从会话事件里提取最近 user 纯文本（只取用户输入，省 token 且更代表意图）。 */
+function extractRecentUserTexts(events: readonly SessionEventLike[]): string[] {
   const texts: string[] = []
-  for (const entry of events) {
-    const event = entry.event
-    if (!event) continue
-    if (event.type !== 'user/message') continue
-    const data = event.data as { content?: unknown; message?: { content?: unknown } } | undefined
-    // 兼容多种历史形状：
-    // - dsh-session 新版：data.content 就是 UserMessage.content
-    // - 旧形状：data.message.content / event.message.content
-    // - 极端情况：data 本身就是字符串
-    const content = (data && 'content' in data)
-      ? data.content
-      : data?.message?.content ?? (event as { message?: { content?: unknown } }).message?.content ?? (typeof data === 'string' ? data : undefined)
-    const text = extractText(content)
+  for (const event of events) {
+    if (event?.type !== 'user/message') continue
+    // 只取**真人输入**：`user/message` 也可能是插件注入的上下文（goal 轮次、
+    // 附加文件等），那些的 `source.kind !== 'user'`，拿来当意图会污染标题。
+    // （旧存档事件可能没有 source，此时保持宽松。）
+    const source = (event.data as { source?: { kind?: string } } | undefined)?.source
+    if (source?.kind !== undefined && source.kind !== 'user') continue
+    const text = extractText(event.data)
     if (text) texts.push(text)
   }
   // 最近消息在尾部；只取最近 5 条用户消息，控制 token 成本。
   return texts.slice(-5)
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractText(content: any): string {
+/**
+ * 从 `user/message` 事件的 `data` 取纯文本。
+ *
+ * 新形状：`data` 就是 `UserMessage`，`content` 是 `ContentBlock[]`
+ * （可见文本块为 `{ type: 'text', text }`）。同时保留旧形状兜底
+ * （`data` 是字符串 / `data.message.content`），兼容存档会话。
+ */
+function extractText(data: unknown): string {
+  if (typeof data === 'string') return data.trim()
+  if (!data || typeof data !== 'object') return ''
+  const record = data as { content?: unknown; message?: { content?: unknown } }
+  const content = 'content' in record ? record.content : record.message?.content
+  return blocksToText(content)
+}
+
+/** 把 `content`（字符串或 `ContentBlock[]`）拼成纯文本；只取可见文本块，跳过 reasoning。 */
+function blocksToText(content: unknown): string {
   if (typeof content === 'string') return content.trim()
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') return part
-        if (part && typeof part === 'object') {
-          if (typeof part.text === 'string') return part.text
-          if (typeof part.content === 'string') return part.content
-        }
-        return ''
-      })
-      .filter(Boolean)
-      .join(' ')
-      .trim()
-  }
-  return ''
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part
+      if (part && typeof part === 'object') {
+        const block = part as { type?: string; text?: unknown; content?: unknown }
+        if (typeof block.text === 'string' && (block.type === undefined || block.type === 'text')) return block.text
+        if (typeof block.content === 'string') return block.content
+      }
+      return ''
+    })
+    .filter(Boolean)
+    .join(' ')
+    .trim()
 }
 
 /**
@@ -256,11 +303,4 @@ function generateTitle(texts: string[]): string | undefined {
   const candidate = clean(userText)
   if (!candidate) return undefined
   return candidate.length <= 20 ? candidate : `${candidate.slice(0, 20)}…`
-}
-
-/** 生成一次宿主 RPC 调用 id。 */
-function makeRpcId(): string {
-  return typeof globalThis.crypto?.randomUUID === 'function'
-    ? globalThis.crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }

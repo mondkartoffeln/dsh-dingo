@@ -39,56 +39,71 @@ export interface DingoRpcDeps {
   readonly setWebVisible?: (visible: boolean) => void;
 }
 
-/** 注册 `/dingo` RPC 通道（可逆 effect；unload 时自动卸载）。 */
+/**
+ * 注册 `/dingo` RPC 通道（可逆 effect；unload 时自动卸载）。
+ *
+ * ⚠️ 必须用 **`ctx.inject(['connection', 'webServer'], cb)`** 的作用域注入，
+ * 不能直接 `ctx.connection.rpc.handle(...)`，也不能只把 `connection` 放进插件顶层
+ * `inject`：`handle()` 内部是
+ * `owner.effect(() => owner.webServer.register(route))`（见 dsh-client-connection
+ * 的 `register`），即它要求**读该服务作用域**同时持有 `connection` 和 `webServer`，
+ * 否则抛 `cannot get property "webServer" without inject`。
+ * 这正是 DSH 自己在 `dsh-api-gateway` 里的写法（`ctx.inject(["connection","webServer"], …)`）。
+ *
+ * 作用域注入还有个好处：两个服务缺失时（例如 headless profile）**回调不执行**，
+ * RPC 通道静默不注册，而不是让整个 profile 启动失败。
+ */
 export function installDingoRpc(ctx: Context, deps: DingoRpcDeps, authority: ChannelAuthority): void {
-  ctx.effect(() => ctx.connection.rpc.handle('/dingo', async (endpoint, payload, signal) => {
-    if (signal.aborted) {
-      return { ok: false, error: { code: 'cancelled', message: 'request cancelled', details: {} } };
-    }
-    try {
-      switch (endpoint) {
-        case 'feedback': {
-          return handleFeedbackEndpoint(deps.feedback, payload);
-        }
-        case 'set-current-session': {
-          // 客户端上报"当前查看的对话"：当前对话回复 → 当/当当（crisp 档），
-          // 其他对话 → 另一声音（soft 档"叮"）+ 卡片；own 判定也用它。
-          const record = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>;
-          const sid = typeof record.sessionId === 'string' && record.sessionId !== '' ? record.sessionId : undefined;
-          deps.setCurrentSessionId?.(sid);
-          return { ok: true, value: { current: sid ?? null } };
-        }
-        case 'set-visibility': {
-          // 客户端上报 DSH Web UI 前台可见性：可见时浏览器内提醒已够，
-          // 不发系统通知；不可见/未开 → 发系统通知。
-          const record = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>;
-          deps.setWebVisible?.(record.visible === true);
-          return { ok: true, value: { visible: record.visible === true } };
-        }
-        case 'auto-name': {
-          // 2.0 对话自动命名：header 按钮 / agent 自然语言指令共用同一 host 服务。
-          const record = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>;
-          const sid = typeof record.sessionId === 'string' && record.sessionId !== '' ? record.sessionId : undefined;
-          if (!sid) {
-            return { ok: false, error: { code: 'internal', message: 'sessionId 必填', details: {} } };
-          }
-          const result = await autoNameSession(ctx, sid);
-          if (!result.ok) {
-            return { ok: false, error: { code: 'internal', message: result.error ?? 'auto-name failed', details: {} } };
-          }
-          return { ok: true, value: { title: result.title } };
-        }
-        default:
-          return {
-            ok: false,
-            error: { code: 'internal', message: `unknown /dingo endpoint: ${endpoint}`, details: {} },
-          };
+  ctx.inject(['connection', 'webServer'], (rpcCtx: Context) => {
+    rpcCtx.effect(() => rpcCtx.connection.rpc.handle('/dingo', async (endpoint, payload, signal) => {
+      if (signal.aborted) {
+        return { ok: false, error: { code: 'cancelled', message: 'request cancelled', details: {} } };
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return { ok: false, error: { code: 'internal', message, details: {} } };
-    }
-  }, { authority }), 'dsh-dingo: /dingo channel');
+      try {
+        switch (endpoint) {
+          case 'feedback': {
+            return handleFeedbackEndpoint(deps.feedback, payload);
+          }
+          case 'set-current-session': {
+            // 客户端上报"当前查看的对话"：当前对话回复 → 当/当当（crisp 档），
+            // 其他对话 → 另一声音（soft 档"叮"）+ 卡片；own 判定也用它。
+            const record = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>;
+            const sid = typeof record.sessionId === 'string' && record.sessionId !== '' ? record.sessionId : undefined;
+            deps.setCurrentSessionId?.(sid);
+            return { ok: true, value: { current: sid ?? null } };
+          }
+          case 'set-visibility': {
+            // 客户端上报 DSH Web UI 前台可见性：可见时浏览器内提醒已够，
+            // 不发系统通知；不可见/未开 → 发系统通知。
+            const record = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>;
+            deps.setWebVisible?.(record.visible === true);
+            return { ok: true, value: { visible: record.visible === true } };
+          }
+          case 'auto-name': {
+            // 2.0 对话自动命名：header 按钮 / agent 自然语言指令共用同一 host 服务。
+            const record = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>;
+            const sid = typeof record.sessionId === 'string' && record.sessionId !== '' ? record.sessionId : undefined;
+            if (!sid) {
+              return { ok: false, error: { code: 'internal', message: 'sessionId 必填', details: {} } };
+            }
+            const result = await autoNameSession(ctx, sid);
+            if (!result.ok) {
+              return { ok: false, error: { code: 'internal', message: result.error ?? 'auto-name failed', details: {} } };
+            }
+            return { ok: true, value: { title: result.title } };
+          }
+          default:
+            return {
+              ok: false,
+              error: { code: 'internal', message: `unknown /dingo endpoint: ${endpoint}`, details: {} },
+            };
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { ok: false, error: { code: 'internal', message, details: {} } };
+      }
+    }, { authority }), 'dsh-dingo: /dingo channel');
+  });
 }
 
 /* ──────────────────────────────────────────────────────────────────────

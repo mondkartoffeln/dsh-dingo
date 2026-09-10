@@ -26,8 +26,20 @@ import type { ChannelAuthority } from './types.ts';
 
 export const name = 'dsh-dingo';
 
-/** 插件初始化前必须可用的宿主服务。 */
-export const inject = ['connection', 'apiProxy', 'tools'] as const;
+/**
+ * 插件初始化前必须可用的宿主服务。
+ *
+ * 只声明 `tools`（注册 `rename_current_session` 工具；`dsh-base` 里必有）。
+ *
+ * web 专属的 `connection` / `webServer` **故意不放在这里**：顶层 `inject` 是硬等待，
+ * 声明了宿主没有的服务，插件会永久 pending，boot 的 `assertEntriesActivated`
+ * 会让**整个 profile 启动失败**（2026-09 真实踩坑：`apiProxy` 被新版移除 →
+ * web profile 起不来）。这类服务改用 `ctx.inject([...], cb)` 的**作用域注入**
+ * （见 `rpc.ts`）：服务就绪才执行回调，缺失则静默跳过。
+ *
+ * 其余可选能力（`sessionTitle` / `sessions` / `agents` / `llm`）一律 `ctx.get()`。
+ */
+export const inject = ['tools'] as const;
 
 /** 设置命名空间（settings UI / profile patch 可覆盖）。 */
 const NS = 'dingo';

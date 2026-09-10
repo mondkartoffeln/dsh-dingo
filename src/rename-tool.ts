@@ -2,12 +2,14 @@
  * dsh-dingo 2.0 — 对话内自然语言重命名工具（host 侧）。
  *
  * 这个工具让主 LLM 在当前对话上下文中直接生成标题（吃到缓存），
- * 然后调用本工具把标题写入 `session.rename`。
+ * 然后调用本工具把标题写入会话标题事件（经 `renameSessionTitle` →
+ * 宿主 `session-title` 服务）。
  * 按钮入口仍走独立的 `/dingo.auto-name`（DeepSeek-V4.1-Flash）。
  *
  * @module dsh-dingo/rename-tool
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { renameSessionTitle } from './auto-name.ts'
 
 /** 注册 `rename_current_session` 工具；无 tools 服务时静默跳过。 */
 export function installRenameTool(ctx: Context): void {
@@ -48,23 +50,11 @@ export function installRenameTool(ctx: Context): void {
     async execute(args: any, exec: any): Promise<{ ok: boolean; title: string }> {
       const sessionId = String(exec?.agent?.session?.id ?? exec?.agent?.id ?? '')
       if (!sessionId) throw new Error('无法确定当前会话')
-      const api = (ctx as unknown as { apiProxy?: { sessions?: { rename(request: { rpcId: unknown; payload: { sessionId: string; title: string } }): Promise<{ result: { ok: boolean; value?: { title: string }; error?: { message?: string } } }> } } }).apiProxy
-      if (!api?.sessions?.rename) throw new Error('重命名服务不可用')
-      const result = await api.sessions.rename({
-        rpcId: makeRpcId(),
-        payload: { sessionId, title: String(args.title) },
-      })
-      if (!result.result.ok) throw new Error(result.result.error?.message ?? '重命名失败')
-      return { ok: true, title: result.result.value?.title ?? String(args.title) }
+      const renamed = renameSessionTitle(ctx, sessionId, String(args.title))
+      if (!renamed.ok) throw new Error(renamed.error)
+      return { ok: true, title: renamed.title }
     },
   }
 
   ctx.effect(() => tools.register(tool), 'dsh-dingo: rename tool')
-}
-
-/** 生成一次宿主 RPC 调用 id。 */
-function makeRpcId(): string {
-  return typeof globalThis.crypto?.randomUUID === 'function'
-    ? globalThis.crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
