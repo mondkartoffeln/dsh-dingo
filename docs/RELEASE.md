@@ -3,6 +3,10 @@
 > 2026-08-15 首次发布：`dsh-dingo@0.1.0`；2026-08-16 升 1.0.0（功能完整版）；
 > 2026-08 本地进入 2.0（会话 1:1 常驻卡片 + 自动命名），`package.json` 版本已对齐
 > `2.0.0`，待发版（含 `npm version major` 打 `v2.0.0` tag 与 `npm publish`）。
+> **2026-09-10 升 2.4.0**：适配 DSH 0.1.5-rc.1 —— 移除已废弃的 `apiProxy`
+> （改用 `sessions` / `sessionTitle` / `workspaceRegistry`），`/dingo` RPC 改为
+> `ctx.inject(['connection','webServer'])` 作用域注入。**这是一次必须升级的兼容修复：
+> 2.3.0 在 DSH 0.1.5-rc.1 上会让整个 web profile 无法启动。**
 > 本文档记录完整发布流程与踩坑，方便后续发版直接照做。
 
 ## 发版流程
