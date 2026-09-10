@@ -63,7 +63,7 @@
 
 | Entry | Method |
 |---|---|
-| `Rename` button | independent DeepSeek V4 Flash call |
+| `Rename` button | independent DeepSeek-V4.1-Flash call (`autoNameModel`, default `deepseek-flash`) |
 | Natural language in chat | main LLM generates title, then calls `rename_current_session` tool |
 | `/dingo rename` | fallback command using the independent Flash path |
 

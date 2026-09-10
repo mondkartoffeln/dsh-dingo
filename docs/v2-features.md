@@ -48,7 +48,8 @@
 
 ## 自动命名
 
-- **按钮（Rename）**：独立调用 DeepSeek V4 Flash 生成标题。
+- **按钮（Rename）**：独立调用 DeepSeek-V4.1-Flash 生成标题
+  （模型可配 `autoNameModel`，默认 `deepseek-flash`；不在宿主目录里时自动回退旧型号，全不可用则用规则标题）。
 - **对话内自然语言**：主 LLM 在当前上下文生成标题后调用 `rename_current_session` 工具改名（吃当前对话缓存）。
 - `/dingo rename`：兜底命令，走独立 Flash 逻辑。
 - 生成规则：

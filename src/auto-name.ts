@@ -2,7 +2,7 @@
  * dsh-dingo 2.0 — 对话自动命名（host 侧）。
  *
  * 双入口（header 按钮 / agent 自然语言指令）最终都调用这里的 `autoNameSession`：
- * 读取近期用户消息（合并后喂给 LLM）→ 优先用 DeepSeek V4 Flash 生成有区分度的标题，
+ * 读取近期用户消息（合并后喂给 LLM）→ 优先用 DeepSeek-V4.1-Flash 生成有区分度的标题，
  * 失败时规则回退 → `session.rename`。
  *
  * @module dsh-dingo/auto-name
@@ -15,6 +15,37 @@ export interface AutoNameResult {
   title?: string
   error?: string
 }
+
+/** 自动命名可调项（由插件配置注入）。 */
+export interface AutoNameOptions {
+  /** 标题模型供应商（默认 `deepseek-official`）。 */
+  provider?: string
+  /** 首选标题模型 id（默认 `deepseek-flash` = DeepSeek-V4.1-Flash）。 */
+  model?: string
+}
+
+/** 宿主 `ctx.llm` 的最小形状（避免强耦合）。 */
+interface LlmLike {
+  stream(options: unknown): AsyncIterable<{ type: string; text?: string }>
+  listModels?(provider: string): Promise<readonly { id?: string }[]>
+}
+
+/** 已解析出的标题生成目标：LLM 服务 + 目录里真实存在的 provider/model。 */
+interface TitleTarget {
+  llm: LlmLike
+  provider: string
+  model: string
+}
+
+/** 默认标题模型供应商。 */
+const DEFAULT_TITLE_PROVIDER = 'deepseek-official'
+
+/**
+ * 标题模型偏好顺序：**DeepSeek-V4.1-Flash（`deepseek-flash`）优先**，
+ * 再逐级回退到仍然可用的旧型号。硬编码单一型号会在宿主升级或下线型号后
+ * 静默失效（标题悄悄退回规则版），所以这里按"目录里真实存在"来挑。
+ */
+const TITLE_MODEL_PREFERENCE: readonly string[] = ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro']
 
 /** 会话历史/重命名 API 的最小形状（避免强耦合）。 */
 interface SessionsApiLike {
@@ -42,7 +73,11 @@ interface HistoryEntryLike {
  * 执行自动命名：读取最近消息 → 规则生成标题 → 写入 session.rename。
  * 返回新标题；失败时保持原名并返回错误信息。
  */
-export async function autoNameSession(ctx: Context, sessionId: string): Promise<AutoNameResult> {
+export async function autoNameSession(
+  ctx: Context,
+  sessionId: string,
+  options?: AutoNameOptions,
+): Promise<AutoNameResult> {
   const api = (ctx as unknown as { apiProxy?: { sessions?: SessionsApiLike } }).apiProxy
   if (!api?.sessions) {
     return { ok: false, error: '自动命名不可用：缺少 apiProxy.sessions' }
@@ -55,7 +90,8 @@ export async function autoNameSession(ctx: Context, sessionId: string): Promise<
   }
 
   const texts = extractRecentUserTexts(history.result.value.events ?? [])
-  const title = (await generateTitleWithLlm(ctx, texts)) ?? generateTitle(texts)
+  const target = await resolveTitleTarget(ctx, options)
+  const title = (target ? await generateTitleWithLlm(target, texts) : undefined) ?? generateTitle(texts)
   if (!title) {
     return { ok: false, error: '未能从对话内容生成有效标题' }
   }
@@ -111,12 +147,53 @@ function extractText(content: any): string {
 }
 
 /**
- * 用 DeepSeek V4 Flash 生成标题。
- * 依赖宿主已装配 `ctx.llm`；不可用或生成失败时返回 undefined，由规则回退接管。
+ * 解析本次标题生成要用的 provider/model。
+ *
+ * 型号按 {@link TITLE_MODEL_PREFERENCE} 挑第一个**在当前供应商目录里真实存在**的：
+ * DeepSeek-V4.1-Flash（`deepseek-flash`）优先，其次回退到旧型号；候选全都不在目录里
+ * 时返回 `undefined`，交给规则标题，而不是发一次注定失败的请求。
+ *
+ * 注：DeepSeek 适配器对 `purpose: 'session-title'` 会强制关闭思考
+ * （见 dsh-llm-deepseek 的 `resolveThinking`），所以标题调用不会把 maxTokens
+ * 耗在推理上，60 token 足够。
  */
-async function generateTitleWithLlm(ctx: Context, texts: string[]): Promise<string | undefined> {
-  const llm = ctx.get('llm') as { stream(options: unknown): AsyncIterable<{ type: string; text?: string }> } | undefined
-  if (!llm?.stream || texts.length === 0) return undefined
+async function resolveTitleTarget(ctx: Context, options?: AutoNameOptions): Promise<TitleTarget | undefined> {
+  const llm = ctx.get('llm') as LlmLike | undefined
+  if (typeof llm?.stream !== 'function') return undefined
+
+  const provider = options?.provider?.trim() || DEFAULT_TITLE_PROVIDER
+  const preferred: string[] = []
+  for (const candidate of [options?.model, ...TITLE_MODEL_PREFERENCE]) {
+    const id = candidate?.trim()
+    if (id && !preferred.includes(id)) preferred.push(id)
+  }
+  const fallback: TitleTarget | undefined = preferred[0] ? { llm, provider, model: preferred[0] } : undefined
+
+  // 拿不到目录（旧宿主无 listModels）→ 信任首选型号；调用失败自然走规则回退。
+  if (typeof llm.listModels !== 'function') return fallback
+
+  try {
+    const catalog = await llm.listModels(provider)
+    const available = new Set(
+      catalog
+        .map((entry) => entry.id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+    )
+    // 目录为空 = 供应商未暴露型号信息 → 仍按首选型号试一次。
+    if (available.size === 0) return fallback
+    const model = preferred.find((id) => available.has(id))
+    return model ? { llm, provider, model } : undefined
+  } catch {
+    return fallback
+  }
+}
+
+/**
+ * 用解析出的标题模型生成标题。
+ * 依赖宿主已装配 `ctx.llm`；生成失败或输出不可用时返回 undefined，由规则回退接管。
+ */
+async function generateTitleWithLlm(target: TitleTarget, texts: string[]): Promise<string | undefined> {
+  if (texts.length === 0) return undefined
 
   const prompt = [
     '请根据以下最近 5 条用户消息，生成一个简洁、准确且有区分度的会话标题。',
@@ -131,9 +208,10 @@ async function generateTitleWithLlm(ctx: Context, texts: string[]): Promise<stri
 
   try {
     let title = ''
-    const stream = llm.stream({
-      provider: 'deepseek-official',
-      model: 'deepseek-v4-flash',
+    const stream = target.llm.stream({
+      provider: target.provider,
+      model: target.model,
+      // 辅助调用专用 purpose：DeepSeek 侧据此关闭思考（省钱、省延迟、不占 token 预算）。
       purpose: 'session-title',
       temperature: 0.3,
       maxTokens: 60,
@@ -146,7 +224,7 @@ async function generateTitleWithLlm(ctx: Context, texts: string[]): Promise<stri
         title += chunk.text
       }
     }
-    const clean = title.replace(/^["'“”]+|["'“”]+$/g, '').trim()
+    const clean = normalizeTitle(title)
     // 拒绝模型“反问/索要消息/无法生成”等非标题输出，交给规则回退。
     if (!clean || clean.length > 60 || /请提供|请给我|请发送|需要你提供|无法生成|请先提供|请补充/.test(clean)) {
       return undefined
@@ -155,6 +233,14 @@ async function generateTitleWithLlm(ctx: Context, texts: string[]): Promise<stri
   } catch {
     return undefined
   }
+}
+
+/** 清理模型原始输出：先去掉“标题：”这类前缀，再剥掉包裹引号。 */
+function normalizeTitle(raw: string): string {
+  return raw
+    .replace(/^\s*(标题|会话标题|title)\s*[:：]\s*/i, '')
+    .replace(/^["'“”]+|["'“”]+$/g, '')
+    .trim()
 }
 
 /** 规则回退标题：取第一条用户消息，截断到 20 字。 */

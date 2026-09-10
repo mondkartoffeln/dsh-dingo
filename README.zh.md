@@ -73,7 +73,7 @@
 
 | 入口 | 方式 |
 |---|---|
-| `Rename` 按钮 | 独立调用 DeepSeek V4 Flash 生成标题 |
+| `Rename` 按钮 | 独立调用 DeepSeek-V4.1-Flash 生成标题（`autoNameModel`，默认 `deepseek-flash`） |
 | 对话内自然语言 | 主 LLM 在当前上下文生成标题后调用 `rename_current_session` 工具改名 |
 | `/dingo rename` | 兜底命令，走独立 Flash 逻辑 |
 

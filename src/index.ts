@@ -56,6 +56,11 @@ export const Config = z.object({
   systemNotify: z.boolean().default(true),
   // 系统通知点击直达用的 DSH WebUI 基地址（空 = http://127.0.0.1:3080）
   systemNotifyBaseUrl: z.string().default(''),
+  // 自动命名（Rename 按钮 / `/dingo rename`）用的标题模型。
+  // 默认 DeepSeek-V4.1-Flash——宿主目录里它的 id 是 `deepseek-flash`（显示名 DeepSeek-V41-Flash）。
+  // 型号不在目录里时会按内置偏好顺序回退（V4-Flash → V4-Pro），全部不可用则用规则标题。
+  autoNameProvider: z.string().default('deepseek-official'),
+  autoNameModel: z.string().default('deepseek-flash'),
 });
 
 /** 挂载插件：反馈引擎、当前对话提醒订阅、/dingo RPC、斜杠命令。 */
@@ -74,6 +79,8 @@ export function apply(ctx: Context, config: unknown): void {
     channelAuthority: string;
     systemNotify: boolean;
     systemNotifyBaseUrl: string;
+    autoNameProvider: string;
+    autoNameModel: string;
   };
   const logger = ctx.logger(name);
   const enabled = { value: cfg.enabled };
@@ -156,6 +163,9 @@ export function apply(ctx: Context, config: unknown): void {
       setDnd: (value: boolean) => feedback.setDnd(value),
       dnd: () => feedback.snapshot().dnd,
     },
-    autoName: (sessionId) => autoNameSession(ctx, sessionId),
+    autoName: (sessionId) => autoNameSession(ctx, sessionId, {
+      provider: cfg.autoNameProvider,
+      model: cfg.autoNameModel,
+    }),
   });
 }

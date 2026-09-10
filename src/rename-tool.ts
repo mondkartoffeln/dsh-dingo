@@ -3,7 +3,7 @@
  *
  * 这个工具让主 LLM 在当前对话上下文中直接生成标题（吃到缓存），
  * 然后调用本工具把标题写入 `session.rename`。
- * 按钮入口仍走独立的 `/dingo.auto-name`（DeepSeek V4 Flash）。
+ * 按钮入口仍走独立的 `/dingo.auto-name`（DeepSeek-V4.1-Flash）。
  *
  * @module dsh-dingo/rename-tool
  */
