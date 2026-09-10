@@ -137,6 +137,9 @@ DSH profile 通过 `link:/path/to/dsh-dingo` 指向本仓库时，重启 DSH 后
       quietHours: { start: '', end: '' }
     # systemNotify: true
     # systemNotifyBaseUrl: ''
+    # 自动命名（Rename / `/dingo rename`）用的标题模型，默认 DeepSeek-V4.1-Flash
+    # autoNameProvider: deepseek-official
+    # autoNameModel: deepseek-flash
 ```
 
 ---
@@ -144,7 +147,8 @@ DSH profile 通过 `link:/path/to/dsh-dingo` 指向本仓库时，重启 DSH 后
 ## 开发
 
 ```bash
-npm install
+# --legacy-peer-deps：DSH 插件生态的 rc 版本 peer 依赖有冲突，不加会装不上
+npm install --legacy-peer-deps
 npm run typecheck
 npm test
 npm run verify

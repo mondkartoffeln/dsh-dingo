@@ -99,7 +99,8 @@ Restart DSH after building/updating.
 ## Development
 
 ```bash
-npm install
+# --legacy-peer-deps: the DSH plugin peer graph has rc-version conflicts
+npm install --legacy-peer-deps
 npm run typecheck
 npm test
 npm run verify
