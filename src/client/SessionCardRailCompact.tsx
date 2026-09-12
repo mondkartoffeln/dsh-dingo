@@ -291,14 +291,17 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
    */
   const [flyout, setFlyout] = useState<{ left: number; bottom: number; maxHeight: number } | undefined>(undefined)
 
-  /** 量一次折叠态浮层锚点：小胶囊右缘 +8px，底边对齐胶囊顶边（向上展开）。 */
+  /**
+   * 量一次折叠态浮层锚点：**左边缘对齐小胶囊左边缘**，底边对齐胶囊顶边（向上展开）。
+   */
   const measureFlyout = (): void => {
     const rect = railRef.current?.getBoundingClientRect()
     if (rect === undefined) return
     const viewportW = window.innerWidth
     const viewportH = window.innerHeight
-    // 右侧空间不足时左移，保证整块面板留在视口内（窄窗口）。
-    const left = Math.max(8, Math.min(rect.right + 8, viewportW - FLYOUT_WIDTH - 8))
+    // 左边缘与胶囊左边缘同列（不额外偏移）；仅在右侧空间不足时左移，
+    // 保证整块浮层留在视口内（窄窗口）。
+    const left = Math.max(0, Math.min(rect.left, viewportW - FLYOUT_WIDTH - 8))
     const bottom = Math.max(8, viewportH - rect.top + 6)
     setFlyout({ left, bottom, maxHeight: Math.max(120, bottom - 12) })
   }
