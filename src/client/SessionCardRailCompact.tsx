@@ -79,6 +79,9 @@ export interface FeedbackSnapshotView {
 /** 轮询间隔（ms）：状态变化到卡片上屏的感知延迟。 */
 const POLL_INTERVAL_MS = 1000
 
+/** 折叠 rail（wide=false）浮层面板宽度（px）。折叠态侧边栏只有 56px，放不下卡片。 */
+const FLYOUT_WIDTH = 280
+
 /** 取文本前 max 个字（超长加省略号）。 */
 function truncate(text: string, max: number): string {
   const t = (text ?? '').trim()
@@ -277,6 +280,28 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
   const railRef = useRef<HTMLDivElement | null>(null)
   const [panelOpen, setPanelOpen] = useState(false)
   const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  /**
+   * 折叠 rail（wide=false）时面板的 fixed 锚点。
+   *
+   * 折叠态侧边栏只有 56px，而且**所在列是 `overflow:hidden`**（见
+   * `dsh-client-ui-sidebar` 的 footer 列：`flex-direction:column;flex:1;display:flex;overflow:hidden`）。
+   * 绝对定位的面板（minWidth 260）挂在列内会被裁到只剩约 56px —— 卡片完全读不了。
+   * `position: fixed` 能脱离该裁剪容器（除非祖先有 transform/filter），
+   * 于是把小胶囊的面板做成**贴在小胶囊右侧的浮层**。
+   */
+  const [flyout, setFlyout] = useState<{ left: number; bottom: number; maxHeight: number } | undefined>(undefined)
+
+  /** 量一次折叠态浮层锚点：小胶囊右缘 +8px，底边对齐胶囊顶边（向上展开）。 */
+  const measureFlyout = (): void => {
+    const rect = railRef.current?.getBoundingClientRect()
+    if (rect === undefined) return
+    const viewportW = window.innerWidth
+    const viewportH = window.innerHeight
+    // 右侧空间不足时左移，保证整块面板留在视口内（窄窗口）。
+    const left = Math.max(8, Math.min(rect.right + 8, viewportW - FLYOUT_WIDTH - 8))
+    const bottom = Math.max(8, viewportH - rect.top + 6)
+    setFlyout({ left, bottom, maxHeight: Math.max(120, bottom - 12) })
+  }
 
   /** 打开面板，并取消待关闭计时。 */
   const openPanel = (): void => {
@@ -284,6 +309,8 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
       clearTimeout(closeTimer.current)
       closeTimer.current = undefined
     }
+    // 折叠态先量锚点再打开，避免用上一帧/旧位置的锚点渲染出错位。
+    if (wide === false) measureFlyout()
     setPanelOpen(true)
   }
 
@@ -410,6 +437,14 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
   useEffect(() => {
     void rpc.call('/dingo', 'set-current-session', { sessionId: currentSessionId }).catch(() => {})
   }, [currentSessionId, rpc])
+
+  // 折叠态浮层：窗口尺寸变化时重新量锚点，避免浮层留在旧位置、跑出视口。
+  useEffect(() => {
+    if (!panelOpen || wide !== false) return
+    const onResize = (): void => measureFlyout()
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [panelOpen, wide])
 
   // 卸载时清理自动关闭计时器。
   useEffect(() => {
@@ -613,10 +648,30 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
       </button>
       {panelOpen && (
         // 展开态面板与横条完全等宽（left/right 0 + 去掉 minWidth 撑宽）——
-        // 永不越过条的右缘，任何侧边栏宽度下右侧都不会被遮掩/裁切；
-        // rail 折叠态锚定小胶囊右缘、固定最小宽。
+        // 永不越过条的右缘，任何侧边栏宽度下右侧都不会被遮掩/裁切。
+        //
+        // 折叠态（wide=false）**不能用绝对定位**：侧边栏列 overflow:hidden 且只有
+        // 56px，260px 宽的面板会被裁到几乎不可见。改用 fixed 定位做右侧浮层，
+        // 锚点由 measureFlyout() 在打开时实测（见 openPanel）。首帧还没量到锚点时
+        // 先隐藏，避免先渲染在错误位置再跳一下。
         // hover 保持由外层 rail 容器的 mouseleave 统一负责（面板是它的子节点）。
-        <div style={{ ...styles.panel, ...(wide === false ? { right: 0 } : { left: 0, right: 0, minWidth: 0 }) }}>
+        <div style={{
+          ...styles.panel,
+          ...(wide === false
+            ? flyout === undefined
+              ? { visibility: 'hidden' as const, right: 0 }
+              : {
+                  position: 'fixed' as const,
+                  left: flyout.left,
+                  right: 'auto' as const,
+                  bottom: flyout.bottom,
+                  marginBottom: 0,
+                  width: FLYOUT_WIDTH,
+                  minWidth: FLYOUT_WIDTH,
+                  maxHeight: flyout.maxHeight,
+                }
+            : { left: 0, right: 0, minWidth: 0 }),
+        }}>
           {sortedItems.length === 0 ? (
             <div style={styles.empty}>暂无活跃会话</div>
           ) : (
