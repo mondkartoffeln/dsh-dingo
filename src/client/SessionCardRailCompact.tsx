@@ -671,7 +671,21 @@ function DetailedCard({
         ...bucketCardStyle(bucket, card.status),
       }}
       data-status={card.status}
+      // 无障碍 / 可自动化：卡片是面板的首要操作，必须是真正的可交互元素。
+      // 裸 <div onClick> 既进不了 Tab 顺序（键盘用户点不到），也不被读屏软件识别为按钮，
+      // 还不进浏览器自动化工具的交互清单（该清单只认 a[href]/button/[role=button]/…）。
+      // 外层不能用真 <button>——里面还有 × 关闭按钮，嵌套 button 是非法 HTML。
+      role="button"
+      tabIndex={0}
+      aria-label={`跳转到会话：${workspaceTitle ?? '未分组'} / ${title || '未命名对话'}`}
+      aria-current={isCurrent ? 'true' : undefined}
       onClick={() => onOpen(card)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onOpen(card)
+        }
+      }}
     >
       {isCurrent && <span style={styles.currentBar} />}
       {isCurrent && <span style={styles.currentTag}>当前</span>}
