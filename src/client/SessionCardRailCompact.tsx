@@ -21,6 +21,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import type { RpcCall } from './rpc.ts'
 import { resolveToneUrl, type ToneStyle } from './tones.ts'
+import { nextSessionIndex } from './cycle.ts'
 
 /** `/dingo.feedback` 返回的插播项视图（host 形状的子集，声音层继续用）。 */
 export interface AnnouncementView {
@@ -525,6 +526,53 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
   // 刚重启/事件未产生时用灰点 + 0 占住雷达位；会话数由 barHint 反映。
   const showBar = snapshotAvailable
 
+  // 排序：草稿/后台等待/中间输出等 client 侧状态一起参与。
+  // 提前到「早退」之前算：快捷键回调也要用它，而 hooks 不能放在早退之后。
+  const sortedItems = [...panelItems].sort(
+    (a, b) => cardRank(a, hasDraftFor, isWaiting) - cardRank(b, hasDraftFor, isWaiting),
+  )
+
+  /**
+   * 快捷键切换活跃会话：`Alt+J` 下一个 / `Alt+K` 上一个，
+   * 在**卡片列表**（= 活跃会话，按优先级排序）里循环。
+   *
+   * 为什么选 `Alt+字母`：DSH 自身的全局快捷键极少（输入框内 Enter/方向键，
+   * `Ctrl+Enter` 发送、`Shift+Enter` 换行），`Alt+字母` 完全没被占用；
+   * 同时刻意避开两个坑——`Alt+方向键`（输入框拿它做历史导航）与
+   * `Alt+Shift`（Windows 用来切换键盘布局）。
+   *
+   * 用 ref 传最新值、监听器只注册一次，避免每次渲染反复解绑/绑定。
+   */
+  const orderedRef = useRef<SessionCardView[]>([])
+  const jumpRef = useRef<(card: SessionCardView) => void>(() => {})
+  orderedRef.current = sortedItems
+  jumpRef.current = handleOpenSession
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      // 只认「纯 Alt + J/K」：带其它修饰键一律放行，绝不抢别人的快捷键。
+      // （实测：浏览器桥的 press 按 KeyboardEvent.key 语义发键，"Alt+j" 不是合法
+      //  key 值、不带 altKey；真实键盘按 Alt+J 会正常带 altKey。监听器本身已用
+      //  裸键 j 实测过能触发并完成跳转，见 commit 说明。）
+      if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+      // 输入法组合中不响应，避免打断中文输入。
+      if (event.isComposing) return
+      const step = event.key === 'j' || event.key === 'J' ? 1 : event.key === 'k' || event.key === 'K' ? -1 : 0
+      if (step === 0) return
+      const cards = orderedRef.current
+      if (cards.length === 0) return
+      event.preventDefault()
+      // 从「当前会话」的相邻位置起步：每次按键都真的换到另一个会话
+      // （哪怕只有 2 个活跃会话也能来回切）。下标数学在 cycle.ts 里单测钉死。
+      const at = cards.findIndex((card) => card.sessionId === currentSessionId)
+      const target = cards[nextSessionIndex(cards.length, at, step)]
+      if (target === undefined) return
+      jumpRef.current(target)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [currentSessionId])
+
   // 展开态独占一行：找到所在 footer 操作行并允许换行，本胶囊 width:100% 占满首行，
   // Cordis / remote-web-ui 等其它条目自动换到下一行。依赖「条可见」——host 卡片
   // 加载前组件先渲染 null、DOM 未挂载，晚到卡片出现时才真正挂载，效果必须随之重跑。
@@ -540,11 +588,6 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
   }, [showBar, wide])
 
   if (!showBar) return null
-
-  // 排序：草稿/后台等待/中间输出等 client 侧状态一起参与。
-  const sortedItems = [...panelItems].sort(
-    (a, b) => cardRank(a, hasDraftFor, isWaiting) - cardRank(b, hasDraftFor, isWaiting),
-  )
 
   // 互斥统计：每个会话只归入一个最高优先级桶。
   const counts = { error: 0, question: 0, draft: 0, answered: 0, waiting: 0, intermediate: 0, running: 0, normal: 0 }
