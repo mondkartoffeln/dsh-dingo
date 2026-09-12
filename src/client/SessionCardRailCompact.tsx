@@ -8,7 +8,11 @@
  * - 无异常但有未处理疑问 → 橙色闪烁；
  * - 无异常/疑问但有待阅读结论 → 绿色闪烁；
  * - 全部处理完 → 不闪烁。
- * 鼠标悬停/点击后向上滑出详细卡片面板，显示完整工作区名、对话名和状态颜色。
+ * 鼠标悬停/点击后向上滑出详细卡片面板，每张卡片两行：工作区名（含未完成后台任务
+ * 的 spinner + 数量）/ 对话名。**点击卡片 → 直接跳到那个会话**（client 侧
+ * `sessions.open`，与侧边栏点击同一入口）——这是本面板存在的首要理由：多会话并行时
+ * 不必再去左侧边栏的工作区/会话列表里翻找。
+ * 面板在指针位于「横条 + 面板」范围内时保持常开，指针离开后才延迟收起。
  * 侧边栏收起为 56px rail 时（wide=false）压成小点 + 数字的紧凑图标。
  *
  * @module dsh-dingo/client/SessionCardRailCompact
@@ -160,8 +164,8 @@ function findRowAncestor(el: HTMLElement | null): HTMLElement | null {
  */
 export interface SessionCardRailCompactProps {
   rpc: RpcCall
-  /** 打开指定会话（卡片点击跳转；由 apply 注入，内部走 sessions.open）。 */
-  openSession?: (sessionId: string) => void
+  /** 打开指定会话（卡片点击跳转；由 apply 注入，内部走 sessions.open）。返回是否成功。 */
+  openSession?: (sessionId: string) => boolean
   /**
    * 框架标准钩子：读取全局会话列表快照（标准 selector 形状）。
    * - `current`：当前打开的对话；
@@ -274,13 +278,16 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
   const [panelOpen, setPanelOpen] = useState(false)
   const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
-  /** 打开面板并重置 5 秒自动关闭计时。 */
+  /** 打开面板，并取消待关闭计时。 */
   const openPanel = (): void => {
+    if (closeTimer.current !== undefined) {
+      clearTimeout(closeTimer.current)
+      closeTimer.current = undefined
+    }
     setPanelOpen(true)
-    resetCloseTimer()
   }
 
-  /** 关闭面板并清除自动关闭计时。 */
+  /** 关闭面板并清除待关闭计时。 */
   const closePanel = (): void => {
     setPanelOpen(false)
     if (closeTimer.current !== undefined) {
@@ -289,19 +296,41 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
     }
   }
 
-  /** 重置 5 秒自动关闭计时（鼠标在面板上互动时也会续期）。 */
-  const resetCloseTimer = (): void => {
+  /**
+   * 指针离开「横条 + 面板」整体后，延迟一小会儿再关闭。
+   *
+   * 面板是 rail 容器的**子节点**（绝对定位向上弹出），所以指针从横条移到面板上
+   * **不会**触发容器的 `mouseleave`——一个 hover 语义天然覆盖整个卡片面板，
+   * 不需要在面板上再单独监听什么。
+   *
+   * 旧实现只有一个「5 秒无操作」定时器，且**不在指针移动时续期**：悬停读卡片
+   * 超过 5 秒，面板就会在光标底下自己关掉，点卡片变成跟计时器赛跑（这也是
+   * 「点不到卡片、只能回侧边栏找会话」的直接原因）。改为悬停期间保持常开。
+   *
+   * 留 500ms 宽限：指针擦过边缘时不至于闪烁。
+   */
+  const schedulePanelClose = (): void => {
     if (closeTimer.current !== undefined) clearTimeout(closeTimer.current)
     closeTimer.current = setTimeout(() => {
       closeTimer.current = undefined
       setPanelOpen(false)
-    }, 5000)
+    }, 500)
   }
 
-  /** 点击卡片：执行中只跳转；结论态跳转并标记「正常」（已看过）。 */
+  /**
+   * 点击卡片 → **直达该会话**（本面板的首要用途）。
+   * 执行中只跳转；结论态跳转并标记「正常」（已看过）。
+   *
+   * 跳转失败（服务未就绪 / 会话已删除 / 所属工作区未连接）时**不关闭面板**：
+   * 否则用户既没跳成、又把卡片列表弄丢了，只能回侧边栏翻找——正是本功能要消除的痛点。
+   */
   const handleOpenSession = (card: SessionCardView): void => {
     if (card.sessionId === undefined || card.sessionId === '') return
-    openTarget?.(card.sessionId)
+    const opened = openTarget?.(card.sessionId) ?? false
+    if (!opened) {
+      console.warn(`[dsh-dingo] 打开会话失败：${card.sessionId}（可能已删除，或其工作区未连接）`)
+      return
+    }
     if (card.status !== 'running') {
       void rpc.call('/dingo', 'feedback', { action: 'mark-seen', sessionId: card.sessionId }).catch(() => {})
     }
@@ -531,9 +560,7 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
       className="lv-fb-rail"
       style={railStyle}
       onMouseEnter={openPanel}
-      onMouseLeave={() => {
-        // 不立即关闭：5 秒内保持，超时后自动关闭
-      }}
+      onMouseLeave={schedulePanelClose}
     >
       <button
         type="button"
@@ -586,7 +613,8 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
         // 展开态面板与横条完全等宽（left/right 0 + 去掉 minWidth 撑宽）——
         // 永不越过条的右缘，任何侧边栏宽度下右侧都不会被遮掩/裁切；
         // rail 折叠态锚定小胶囊右缘、固定最小宽。
-        <div style={{ ...styles.panel, ...(wide === false ? { right: 0 } : { left: 0, right: 0, minWidth: 0 }) }} onMouseEnter={resetCloseTimer}>
+        // hover 保持由外层 rail 容器的 mouseleave 统一负责（面板是它的子节点）。
+        <div style={{ ...styles.panel, ...(wide === false ? { right: 0 } : { left: 0, right: 0, minWidth: 0 }) }}>
           {sortedItems.length === 0 ? (
             <div style={styles.empty}>暂无活跃会话</div>
           ) : (

@@ -37,42 +37,59 @@ export const LOCALE_NS = 'dingo'
 export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as unknown as ConnectionHandle
   const rpc = connection.rpc
-  // 会话跳转服务：卡片点击 → 直接打开对应对话（与侧边栏点击同一入口）。
-  // 注意：open 要求会话在列表内；未知/已删除会话会抛错，这里静默忽略。
-  const sessions = ctx.get('sessions') as {
+  // 会话跳转服务：卡片点击 / 系统通知深链 → 直接打开对应对话（与侧边栏点击同一入口）。
+  //
+  // ⚠️ 必须**惰性**取服务：`ctx.get()` 不等服务就绪，客户端插件的挂载顺序也没有保证。
+  // 若在 apply 阶段读一次就存下来，会话服务晚挂载时会永久拿到 undefined，而调用点
+  // 又被 `?.` + try/catch 兜着 → 点卡片「静默无反应」，且**深链整段装不上**。
+  // （同源事故：host 侧把 `(ctx as any).apiProxy` 写成默认参数，加载即崩。）
+  const getSessions = (): {
+    open(id: string): void
+    binding(id: string): { ctx: unknown } | undefined
+  } | undefined => ctx.get('sessions') as {
     open(id: string): void
     binding(id: string): { ctx: unknown } | undefined
   } | undefined
-  // 会话输入服务：用于读取任意会话的未发送草稿。
-  const conversation = ctx.get('conversation') as {
-    input: {
-      for(actx: unknown): { state: { getSnapshot(): { draft: string } } }
-      shell?(id: string): { state: { getSnapshot(): { draft: string } } }
+
+  /**
+   * 打开指定会话 —— 卡片点击与深链跳转的唯一入口。
+   * 服务缺失或会话不在列表（已删除/归档/所属工作区未连接）时返回 false；
+   * 不抛错：调用方是 UI 事件，失败不该炸掉渲染。
+   */
+  const openSessionById = (sessionId: string): boolean => {
+    const sessions = getSessions()
+    if (sessions === undefined) return false
+    try {
+      sessions.open(sessionId)
+      return true
+    } catch {
+      return false
     }
-  } | undefined
+  }
+
+  // 会话输入服务：用于读取任意会话的未发送草稿（同样惰性解析）。
   const getDraftBySession = (sessionId: string): string => {
     try {
-      const input = conversation?.input.shell?.(sessionId) ?? conversation?.input.for((sessions?.binding(sessionId) as { ctx: unknown } | undefined)?.ctx as never)
+      const conversation = ctx.get('conversation') as {
+        input: {
+          for(actx: unknown): { state: { getSnapshot(): { draft: string } } }
+          shell?(id: string): { state: { getSnapshot(): { draft: string } } }
+        }
+      } | undefined
+      const input = conversation?.input.shell?.(sessionId) ?? conversation?.input.for((getSessions()?.binding(sessionId) as { ctx: unknown } | undefined)?.ctx as never)
       return input?.state.getSnapshot()?.draft ?? ''
     } catch {
       return ''
     }
   }
 
-  // 系统通知深链：dingOpen 参数 + 标签页复用（已有 DSH 标签页接管跳转并聚焦）
-  if (sessions !== undefined) {
-    ctx.effect(() => installDeepLink({
-      openSession: (sessionId: string) => {
-        try {
-          sessions.open(sessionId)
-        } catch {
-          // 会话已不在列表（删除/归档）→ 静默
-        }
-      },
-      channel: typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('dsh-dingo-deeplink') : undefined,
-      closeWindow: () => window.close(),
-    }), 'dsh-dingo: deeplink')
-  }
+  // 系统通知深链：dingOpen 参数 + 标签页复用（已有 DSH 标签页接管跳转并聚焦）。
+  // 无条件安装：目标服务在点击时才惰性解析，缺失也只是返回 false，不会崩。
+  ctx.effect(() => installDeepLink({
+    openSession: openSessionById,
+    channel: typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('dsh-dingo-deeplink') : undefined,
+    closeWindow: () => window.close(),
+  }), 'dsh-dingo: deeplink')
 
   // 上报 DSH Web UI 前台可见性：host 据此决定是否发系统通知
   // （可见 → 浏览器内提醒已够；不可见/未开 → 系统通知）。
@@ -111,13 +128,8 @@ export function apply(ctx: ClientContext): void {
       inject: () => ({
         rpc,
         getDraftBySession,
-        openSession: (sessionId: string) => {
-          try {
-            sessions?.open(sessionId)
-          } catch {
-            // 会话已不在列表（删除/归档）→ 静默；卡片照常关闭
-          }
-        },
+        // 卡片点击 → 直达对应会话（惰性解析 sessions，见 openSessionById）。
+        openSession: openSessionById,
       }),
     }, SessionCardRailCompact as unknown as (props: SessionCardRailCompactProps) => JSX.Element))
   }, 'dsh-dingo: session card rail slot')
