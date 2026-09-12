@@ -35,6 +35,9 @@ export const LOCALE_NS = 'dingo'
  * useSessions 由框架标准 props 注入（读取当前打开的对话）。
  */
 export function apply(ctx: ClientContext): void {
+  // 载入标记：确认浏览器里跑的是哪一份产物。排查「改了没生效 / 点了没反应」时，
+  // 这是唯一可靠的锚点——看不到这行就说明客户端 bundle 是旧的（没重启或缓存）。
+  console.info('[dsh-dingo] client bundle loaded · 2026-09-12 · card-jump')
   const connection = ctx.get('connection') as unknown as ConnectionHandle
   const rpc = connection.rpc
   // 会话跳转服务：卡片点击 / 系统通知深链 → 直接打开对应对话（与侧边栏点击同一入口）。
@@ -53,18 +56,55 @@ export function apply(ctx: ClientContext): void {
 
   /**
    * 打开指定会话 —— 卡片点击与深链跳转的唯一入口。
-   * 服务缺失或会话不在列表（已删除/归档/所属工作区未连接）时返回 false；
-   * 不抛错：调用方是 UI 事件，失败不该炸掉渲染。
+   *
+   * 与侧边栏「点会话」走**同一条路径**。侧边栏的实现（`dsh-client-ui-workspace`
+   * 的 `openSession`）是**两句**，不是一句：
+   *
+   * ```js
+   * this.sessions.open(sessionId);
+   * this.ctx.layout.selectPanel(null);   // ← 少了这句就会「点了没反应」
+   * ```
+   *
+   * `sessions.open` 只把会话送上 stage（`list.current` 改变）；主区当前若正显示某个
+   * 面板（layout 选中的 MainPanel），视图仍渲染面板 → 看起来毫无反应。
+   *
+   * 优先调用 DSH 自己暴露的 `uiWorkspace.openSession`（同一份实现、同一入口，
+   * 将来它加副作用也自动跟随）；不可用时回退到手工两句。
+   *
+   * 返回是否成功；不抛错——调用方是 UI 事件，失败不该炸掉渲染。
    */
   const openSessionById = (sessionId: string): boolean => {
+    // 首选：DSH 自己的会话打开入口（侧边栏用的就是它）。
+    const uiWorkspace = ctx.get('uiWorkspace') as { openSession?(id: string): void } | undefined
+    if (typeof uiWorkspace?.openSession === 'function') {
+      try {
+        uiWorkspace.openSession(sessionId)
+        return true
+      } catch (error) {
+        console.warn('[dsh-dingo] uiWorkspace.openSession 抛错，回退 sessions.open：', error)
+      }
+    } else {
+      console.warn('[dsh-dingo] 没有 uiWorkspace.openSession，回退 sessions.open（缺 selectPanel 可能不切换视图）')
+    }
+
     const sessions = getSessions()
-    if (sessions === undefined) return false
-    try {
-      sessions.open(sessionId)
-      return true
-    } catch {
+    if (sessions === undefined) {
+      console.warn('[dsh-dingo] 跳转失败：client 端取不到 sessions 服务')
       return false
     }
+    try {
+      sessions.open(sessionId)
+    } catch (error) {
+      console.warn(`[dsh-dingo] sessions.open(${sessionId}) 抛错（会话可能不在列表/工作区未连接）：`, error)
+      return false
+    }
+    // 补齐侧边栏的第二个动作：清掉主区面板，让会话真正可见。
+    try {
+      (ctx.get('layout') as { selectPanel?(id: null): void } | undefined)?.selectPanel?.(null)
+    } catch (error) {
+      console.warn('[dsh-dingo] layout.selectPanel(null) 抛错：', error)
+    }
+    return true
   }
 
   // 会话输入服务：用于读取任意会话的未发送草稿（同样惰性解析）。

@@ -326,6 +326,8 @@ export function SessionCardRailCompact({ rpc, openSession: openTarget, useSessio
    */
   const handleOpenSession = (card: SessionCardView): void => {
     if (card.sessionId === undefined || card.sessionId === '') return
+    // 诊断锚点：能打出这行 = 点击确实到达了卡片（不是被遮挡 / 事件没绑上）。
+    console.info(`[dsh-dingo] 卡片点击 → ${card.sessionId}`, { openTarget: typeof openTarget })
     const opened = openTarget?.(card.sessionId) ?? false
     if (!opened) {
       console.warn(`[dsh-dingo] 打开会话失败：${card.sessionId}（可能已删除，或其工作区未连接）`)
